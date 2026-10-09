@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  HUSKY: 0
+  # Throwaway values for CI only; tests never read a real .env.
+  PORT: 8001
+  DB_HOST: 127.0.0.1
+  DB_PORT: 5432
+  DB_NAME: tpjp_ci
+  DB_USER: tpjp
+  DB_PASSWORD: tpjp
+  JWT_ACCESS_SECRET: ci-access-secret-not-used-anywhere-else-0001
+  JWT_REFRESH_SECRET: ci-refresh-secret-not-used-anywhere-else-002
+
+jobs:
+  verify:
+    name: Lint, typecheck, test, build, contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version comes from "packageManager" in package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: OpenAPI contract is up to date
+        run: |
+          pnpm gen:openapi
+          git diff --exit-code openapi.json || (echo "openapi.json is stale: run pnpm gen:openapi and commit it" && exit 1)
+
+  migrations:
+    name: Migrations apply to a real PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: tpjp_ci
+          POSTGRES_USER: tpjp
+          POSTGRES_PASSWORD: tpjp
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U tpjp" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm migrate
+      - name: Re-running is a no-op
+        run: pnpm migrate | grep -q "Already up to date"

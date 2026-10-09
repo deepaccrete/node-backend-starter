@@ -1,0 +1,43 @@
+# Local full stack: PostgreSQL + the API. Postgres is published on host port
+# 5433 so it does not clash with a PostgreSQL already installed on 5432.
+#
+#   docker compose up -d db                                   # database only
+#   docker compose run --rm api node dist/scripts/migrate.js up
+#   docker compose up -d api
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in .env}
+      POSTGRES_USER: ${DB_USER:?set DB_USER in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    ports:
+      - '5433:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      # The container runs as production (stdout logs, strict CORS) whatever .env says.
+      NODE_ENV: production
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      DB_HOST: db
+      DB_PORT: '5432'
+    ports:
+      - '${PORT:-8001}:${PORT:-8001}'
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Uploaded files survive container rebuilds. Logs go to stdout (docker compose logs api).
+      - ./uploads:/app/dist/src/public/uploads
+
+volumes:
+  pgdata:

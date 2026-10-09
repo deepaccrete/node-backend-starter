@@ -1,0 +1,456 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "TPJP API",
+    "version": "0.1.0",
+    "description": "Lotte India Telecalling Permanent Journey Plan — dashboard API. Every response uses the envelope { success, message, data, meta } or, on failure, { success: false, code, message, errors }."
+  },
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "Session": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "accessToken": {
+            "type": "string",
+            "description": "Short-lived bearer token. Keep in memory only."
+          }
+        },
+        "required": [
+          "user",
+          "accessToken"
+        ]
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "username": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "ADMIN",
+              "GM",
+              "ZM",
+              "RM",
+              "ASM"
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "dashboard:view",
+                "reports:view",
+                "reports:export",
+                "plans:upload",
+                "masters:manage",
+                "users:manage",
+                "samples:view"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "name",
+          "role",
+          "permissions"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "BAD_REQUEST",
+              "VALIDATION_FAILED",
+              "INVALID_JSON",
+              "NOT_FOUND",
+              "ROUTE_NOT_FOUND",
+              "CONFLICT",
+              "RATE_LIMITED",
+              "ORIGIN_NOT_ALLOWED",
+              "DB_CONSTRAINT",
+              "INTERNAL_ERROR",
+              "UNAUTHENTICATED",
+              "TOKEN_EXPIRED",
+              "INVALID_CREDENTIALS",
+              "ACCOUNT_LOCKED",
+              "SESSION_EXPIRED",
+              "REFRESH_REUSED",
+              "FORBIDDEN"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          },
+          "requestId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "code",
+          "message"
+        ]
+      },
+      "FieldError": {
+        "type": "object",
+        "properties": {
+          "field": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "message"
+        ]
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign in with username and password",
+        "description": "Sets the refresh token as an httpOnly cookie (tpjp_rt, SameSite=Strict, path /api/v1/auth). The same message is returned for an unknown username and a wrong password.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (VALIDATION_FAILED, INVALID_JSON, DB_CONSTRAINT)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in or token expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Account temporarily locked (ACCOUNT_LOCKED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (RATE_LIMITED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Get a new access token using the refresh cookie",
+        "description": "Sets the refresh token as an httpOnly cookie (tpjp_rt, SameSite=Strict, path /api/v1/auth). Rotates the refresh token; reusing an old one ends every session of that user (REFRESH_REUSED).",
+        "responses": {
+          "200": {
+            "description": "New session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in or token expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (RATE_LIMITED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign out: revoke the session and clear the refresh cookie",
+        "responses": {
+          "204": {
+            "description": "Signed out"
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "The signed-in user",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/User"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in or token expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness: the process is running",
+        "responses": {
+          "200": {
+            "description": "Running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    },
+                    "uptimeSeconds": {
+                      "type": "integer"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "uptimeSeconds",
+                    "version",
+                    "timestamp"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness: the database answers",
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "Database unavailable"
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}
