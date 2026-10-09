@@ -10,12 +10,13 @@
 import type { CookieOptions, Request, Response } from 'express';
 
 import { env } from '../../config/env.js';
+import { project } from '../../config/project.js';
 import { AuthService, type IssuedSession } from '../../services/auth.service.js';
 import { UnauthorizedError } from '../../utils/errors.js';
 import { success } from '../../utils/response.js';
 import type { LoginBody } from '../../routes/auth/auth.route.js';
 
-export const REFRESH_COOKIE = 'tpjp_rt';
+export const REFRESH_COOKIE = `${project.slug}_rt`;
 
 const cookieOptions = (): CookieOptions => ({
     httpOnly: true,

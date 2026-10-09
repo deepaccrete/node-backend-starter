@@ -9,7 +9,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 
-import { AuthController } from '../../controllers/auth/auth.controller.js';
+import { AuthController, REFRESH_COOKIE } from '../../controllers/auth/auth.controller.js';
 import { PERMISSIONS, ROLES } from '../../config/permissions.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { validate } from '../../middleware/validate.js';
@@ -66,8 +66,7 @@ export const SessionSchema = z
 const PATH = '/auth';
 const router = Router();
 
-const COOKIE_NOTE =
-    'Sets the refresh token as an httpOnly cookie (tpjp_rt, SameSite=Strict, path /api/v1/auth).';
+const COOKIE_NOTE = `Sets the refresh token as an httpOnly cookie (${REFRESH_COOKIE}, SameSite=Strict, path /api/v1/auth).`;
 
 router.post('/login', validate({ body: LoginBodySchema }), asyncHandler(AuthController.login));
 registry.registerPath({

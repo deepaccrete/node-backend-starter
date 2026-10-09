@@ -116,6 +116,7 @@ const { requirePermission } = await import('../src/middleware/requirePermission.
 const { errorHandler } = await import('../src/middleware/errorHandler.js');
 const { requestContext } = await import('../src/middleware/requestContext.js');
 const { signAccessToken } = await import('../src/services/token.service.js');
+const { REFRESH_COOKIE } = await import('../src/controllers/auth/auth.controller.js');
 
 const PASSWORD = 'correct horse battery';
 let app: Express;
@@ -134,11 +135,11 @@ function addUser(id: number, username: string, rolecode: Role, extra: Partial<Fa
     });
 }
 
-/** The value of the tpjp_rt cookie from a response, or undefined. */
+/** The value of the refresh cookie from a response, or undefined. */
 function refreshCookie(res: request.Response): string | undefined {
     const raw = res.headers['set-cookie'] as unknown as string[] | undefined;
-    const line = raw?.find((c) => c.startsWith('tpjp_rt='));
-    const value = line?.split(';')[0]?.slice('tpjp_rt='.length);
+    const line = raw?.find((c) => c.startsWith(`${REFRESH_COOKIE}=`));
+    const value = line?.split(';')[0]?.slice(`${REFRESH_COOKIE}=`.length);
     return value === '' ? undefined : value;
 }
 
@@ -168,7 +169,7 @@ describe('POST /auth/login', () => {
         expect(body.data.accessToken).toEqual(expect.any(String));
 
         const cookie = (res.headers['set-cookie'] as unknown as string[]).find((c) =>
-            c.startsWith('tpjp_rt=')
+            c.startsWith(`${REFRESH_COOKIE}=`)
         );
         expect(cookie).toMatch(/HttpOnly/);
         expect(cookie).toMatch(/SameSite=Strict/);
@@ -261,7 +262,7 @@ describe('POST /auth/refresh', () => {
         const first = refreshCookie(await login('admin'));
         const res = await request(app)
             .post('/api/v1/auth/refresh')
-            .set('Cookie', `tpjp_rt=${first ?? ''}`);
+            .set('Cookie', `${REFRESH_COOKIE}=${first ?? ''}`);
         expect(res.status).toBe(200);
         const second = refreshCookie(res);
         expect(second).toBeDefined();
@@ -271,18 +272,18 @@ describe('POST /auth/refresh', () => {
     it('treats a replayed old token as theft: REFRESH_REUSED and every session revoked', async () => {
         const first = refreshCookie(await login('admin')) ?? '';
         const other = refreshCookie(await login('admin')) ?? ''; // a second device
-        await request(app).post('/api/v1/auth/refresh').set('Cookie', `tpjp_rt=${first}`);
+        await request(app).post('/api/v1/auth/refresh').set('Cookie', `${REFRESH_COOKIE}=${first}`);
 
         const replay = await request(app)
             .post('/api/v1/auth/refresh')
-            .set('Cookie', `tpjp_rt=${first}`);
+            .set('Cookie', `${REFRESH_COOKIE}=${first}`);
         expect(replay.status).toBe(401);
         expect(replay.body).toMatchObject({ code: 'REFRESH_REUSED' });
         expect(vi.mocked(SessionModel.revokeAllForUser)).toHaveBeenCalledWith(1);
 
         const otherDevice = await request(app)
             .post('/api/v1/auth/refresh')
-            .set('Cookie', `tpjp_rt=${other}`);
+            .set('Cookie', `${REFRESH_COOKIE}=${other}`);
         expect(otherDevice.status).toBe(401);
     });
 
@@ -298,13 +299,15 @@ describe('POST /auth/logout', () => {
         const token = refreshCookie(await login('admin')) ?? '';
         const res = await request(app)
             .post('/api/v1/auth/logout')
-            .set('Cookie', `tpjp_rt=${token}`);
+            .set('Cookie', `${REFRESH_COOKIE}=${token}`);
         expect(res.status).toBe(204);
-        expect((res.headers['set-cookie'] as unknown as string[])[0]).toMatch(/tpjp_rt=;/);
+        expect((res.headers['set-cookie'] as unknown as string[])[0]).toMatch(
+            new RegExp(`^${REFRESH_COOKIE}=;`)
+        );
 
         const after = await request(app)
             .post('/api/v1/auth/refresh')
-            .set('Cookie', `tpjp_rt=${token}`);
+            .set('Cookie', `${REFRESH_COOKIE}=${token}`);
         expect(after.status).toBe(401);
     });
 });

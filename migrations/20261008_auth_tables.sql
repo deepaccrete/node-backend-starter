@@ -1,12 +1,14 @@
 -- Authentication tables: dashboard users and their sign-in sessions.
 -- House conventions: lowercase names without underscores, smallint 0/1 flags,
 -- soft delete, audit columns, named constraints (registered in src/utils/pgError.ts).
+-- rolecode is checked by the application against src/config/permissions.ts, so a
+-- project can change its roles without a migration.
 
 CREATE TABLE IF NOT EXISTS usermaster (
     id            serial       PRIMARY KEY,
     username      varchar(64)  NOT NULL,
     fullname      varchar(150) NOT NULL,
-    rolecode      varchar(10)  NOT NULL,
+    rolecode      varchar(30)  NOT NULL,
     passwordhash  varchar(100) NOT NULL,
     failedlogins  smallint     NOT NULL DEFAULT 0,
     lockeduntil   timestamptz,
@@ -17,7 +19,6 @@ CREATE TABLE IF NOT EXISTS usermaster (
     createdat     timestamptz  NOT NULL DEFAULT NOW(),
     updatedby     int          NOT NULL DEFAULT 0,
     updatedat     timestamptz  NOT NULL DEFAULT NOW(),
-    CONSTRAINT ck_usermaster_rolecode CHECK (rolecode IN ('ADMIN', 'GM', 'ZM', 'RM', 'ASM')),
     CONSTRAINT ck_usermaster_isactive CHECK (isactive IN (0, 1)),
     CONSTRAINT ck_usermaster_isdeleted CHECK (isdeleted IN (0, 1))
 );

@@ -14,6 +14,8 @@ import { readFileSync } from 'node:fs';
 
 import { z } from 'zod';
 
+import { project } from './project.js';
+
 const MIN_SECRET_LENGTH = 32;
 
 const int = (fallback: number) => z.coerce.number().int().positive().default(fallback);
@@ -44,7 +46,7 @@ const list = z
 
 const schema = z
     .object({
-        APP_NAME: z.string().default('tpjp-api'),
+        APP_NAME: z.string().default(project.name),
         NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
         PORT: port('PORT'),

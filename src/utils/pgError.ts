@@ -11,7 +11,6 @@
 /** Constraint / index name → user-facing message. */
 export const CONSTRAINT_MESSAGES: Record<string, string> = {
     uq_usermaster_username: 'A user with this username already exists.',
-    ck_usermaster_rolecode: 'The role is not one of ADMIN, GM, ZM, RM or ASM.',
 };
 
 /** SQLSTATEs that mean "the value the client sent cannot be stored". */

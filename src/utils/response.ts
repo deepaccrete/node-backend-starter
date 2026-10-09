@@ -4,7 +4,7 @@
  *   success  { "success": true,  "message": "...", "data": …, "meta": { … } }
  *   failure  { "success": false, "code": "...", "message": "...", "errors": [ … ] }
  *
- * `code` on failures is the TPJP addition to the house envelope: a stable,
+ * `code` on failures is this project's addition to the house envelope: a stable,
  * machine-readable reason (see errorCodes.ts). ONE naming style, on purpose.
  */
 

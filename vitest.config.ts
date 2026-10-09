@@ -12,7 +12,7 @@ export default defineConfig({
             PORT: '8001',
             DB_HOST: '127.0.0.1',
             DB_PORT: '5432',
-            DB_NAME: 'tpjp_test',
+            DB_NAME: 'app_test',
             DB_USER: 'test',
             DB_PASSWORD: '',
             JWT_ACCESS_SECRET: 'test-access-secret-0123456789abcdef0123',

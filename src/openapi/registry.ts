@@ -9,6 +9,7 @@
 import { OpenAPIRegistry, OpenApiGeneratorV31 } from '@asteasolutions/zod-to-openapi';
 import { z } from 'zod';
 
+import { project } from '../config/project.js';
 import { ERROR_CODES } from '../utils/errorCodes.js';
 
 export const registry = new OpenAPIRegistry();
@@ -89,10 +90,10 @@ export function generateOpenApiDocument(apiPrefix: string, version: string) {
     return new OpenApiGeneratorV31(registry.definitions).generateDocument({
         openapi: '3.1.0',
         info: {
-            title: 'TPJP API',
+            title: project.title,
             version,
             description:
-                'Lotte India Telecalling Permanent Journey Plan — dashboard API. Every response uses the ' +
+                `${project.description} Every response uses the ` +
                 'envelope { success, message, data, meta } or, on failure, { success: false, code, message, errors }.',
         },
         servers: [{ url: apiPrefix }],
