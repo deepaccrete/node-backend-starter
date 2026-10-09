@@ -2,11 +2,15 @@
 
 Plain `.sql` files, applied in filename order by `scripts/migrate.ts`.
 
+<!-- @auth-start -->
+
 | File                       | What it creates                                                     |
 | -------------------------- | ------------------------------------------------------------------- |
 | `20261008_auth_tables.sql` | `usermaster` (dashboard users) and `authsession` (sign-in sessions) |
 
-TPJP's business tables are not here yet: each is added with the feature that needs it.
+<!-- @auth-end -->
+
+Business tables are added with the feature that needs them.
 
 ## How the runner works
 
@@ -27,7 +31,7 @@ Prefix with the date so files sort in the order they were written:
 
 ```
 20261008_auth_tables.sql
-20261015_create_distributormaster.sql
+20261015_create_productmaster.sql
 ```
 
 ## Writing one
