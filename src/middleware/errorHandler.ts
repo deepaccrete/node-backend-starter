@@ -78,7 +78,9 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, req, res, _next)
     const log = status >= 500 ? logger.error.bind(logger) : logger.warn.bind(logger);
     log(`${status} ${req.method} ${req.originalUrl} — ${error.message}`, {
         requestId: req.id,
+        // @auth-start
         userId: req.user?.id,
+        // @auth-end
         durationMs: Date.now() - req.startedAt,
         ...(status >= 500 ? { stack: error.stack } : {}),
     });

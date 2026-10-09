@@ -21,8 +21,10 @@ env:
   DB_NAME: tpjp_ci
   DB_USER: tpjp
   DB_PASSWORD: tpjp
+  # @auth-start
   JWT_ACCESS_SECRET: ci-access-secret-not-used-anywhere-else-0001
   JWT_REFRESH_SECRET: ci-refresh-secret-not-used-anywhere-else-002
+  # @auth-end
 
 jobs:
   verify:

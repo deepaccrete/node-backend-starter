@@ -117,6 +117,12 @@ const { errorHandler } = await import('../src/middleware/errorHandler.js');
 const { requestContext } = await import('../src/middleware/requestContext.js');
 const { signAccessToken } = await import('../src/services/token.service.js');
 const { REFRESH_COOKIE } = await import('../src/controllers/auth/auth.controller.js');
+const { ROLES } = await import('../src/config/permissions.js');
+
+// Role-agnostic: ADMIN always exists; MEMBER is any other role the project defines.
+const MEMBER: Role = ROLES.find((r) => r !== 'ADMIN') ?? 'ADMIN';
+/** Granted to ADMIN in every project (ADMIN holds every permission). */
+const ADMIN_ONLY = 'users:manage';
 
 const PASSWORD = 'correct horse battery';
 let app: Express;
@@ -154,7 +160,7 @@ beforeEach(() => {
     store.users.clear();
     store.sessions.clear();
     addUser(1, 'admin', 'ADMIN');
-    addUser(2, 'asm', 'ASM');
+    addUser(2, 'member', MEMBER);
 });
 
 describe('POST /auth/login', () => {
@@ -165,7 +171,7 @@ describe('POST /auth/login', () => {
             data: { user: { role: string; permissions: string[] }; accessToken: string };
         };
         expect(body.data.user.role).toBe('ADMIN');
-        expect(body.data.user.permissions).toContain('plans:upload');
+        expect(body.data.user.permissions).toContain(ADMIN_ONLY);
         expect(body.data.accessToken).toEqual(expect.any(String));
 
         const cookie = (res.headers['set-cookie'] as unknown as string[]).find((c) =>
@@ -174,6 +180,20 @@ describe('POST /auth/login', () => {
         expect(cookie).toMatch(/HttpOnly/);
         expect(cookie).toMatch(/SameSite=Strict/);
         expect(cookie).toMatch(/Path=\/api\/v1\/auth/);
+    });
+
+    it('returns one message per invalid field', async () => {
+        const res = await request(app).post('/api/v1/auth/login').send({ username: '   ' });
+        expect(res.status).toBe(400);
+        expect(res.body).toMatchObject({
+            success: false,
+            code: 'VALIDATION_FAILED',
+            message: 'Validation failed',
+            errors: [
+                { field: 'username', message: 'Enter your username' },
+                { field: 'password', message: 'Enter your password' },
+            ],
+        });
     });
 
     it('gives the same answer for a wrong password and an unknown user', async () => {
@@ -197,20 +217,20 @@ describe('POST /auth/login', () => {
     });
 
     it('refuses a deactivated user like an unknown one', async () => {
-        addUser(3, 'gone', 'RM', { isactive: 0 });
+        addUser(3, 'gone', MEMBER, { isactive: 0 });
         expect((await login('gone')).body).toMatchObject({ code: 'INVALID_CREDENTIALS' });
     });
 });
 
 describe('access token', () => {
     it('opens /auth/me', async () => {
-        const token = ((await login('asm')).body as { data: { accessToken: string } }).data
+        const token = ((await login('member')).body as { data: { accessToken: string } }).data
             .accessToken;
         const me = await request(app)
             .get('/api/v1/auth/me')
             .set('Authorization', `Bearer ${token}`);
         expect(me.status).toBe(200);
-        expect(me.body).toMatchObject({ data: { username: 'asm', role: 'ASM' } });
+        expect(me.body).toMatchObject({ data: { username: 'member', role: MEMBER } });
     });
 
     it('is rejected when expired (TOKEN_EXPIRED) and when it is really a refresh token', async () => {
@@ -240,7 +260,7 @@ describe('access token', () => {
 
     it('is rejected when its typ is not "access", even if signed with the access secret', async () => {
         const wrongType = jwt.sign(
-            { sub: '1', sid: 's', role: 'ADMIN', permissions: ['plans:upload'], typ: 'refresh' },
+            { sub: '1', sid: 's', role: 'ADMIN', permissions: [ADMIN_ONLY], typ: 'refresh' },
             process.env.JWT_ACCESS_SECRET ?? ''
         );
         const res = await request(app)
@@ -250,7 +270,7 @@ describe('access token', () => {
     });
 
     it('is never read from a cookie', async () => {
-        const token = ((await login('asm')).body as { data: { accessToken: string } }).data
+        const token = ((await login('member')).body as { data: { accessToken: string } }).data
             .accessToken;
         const res = await request(app).get('/api/v1/auth/me').set('Cookie', `access=${token}`);
         expect(res.status).toBe(401);
@@ -315,7 +335,7 @@ describe('POST /auth/logout', () => {
 describe('requirePermission', () => {
     const guarded = express()
         .use(requestContext)
-        .get('/upload', authenticate, requirePermission('plans:upload'), (_req, res) => {
+        .get('/upload', authenticate, requirePermission(ADMIN_ONLY), (_req, res) => {
             res.json({ ok: true });
         })
         .use(errorHandler);
@@ -326,13 +346,13 @@ describe('requirePermission', () => {
     it('answers 403 FORBIDDEN without the permission and lets it through with it', async () => {
         const denied = await request(guarded)
             .get('/upload')
-            .set('Authorization', `Bearer ${tokenFor('ASM', ['dashboard:view'])}`);
+            .set('Authorization', `Bearer ${tokenFor(MEMBER, [])}`);
         expect(denied.status).toBe(403);
         expect(denied.body).toMatchObject({ code: 'FORBIDDEN' });
 
         const allowed = await request(guarded)
             .get('/upload')
-            .set('Authorization', `Bearer ${tokenFor('ADMIN', ['plans:upload'])}`);
+            .set('Authorization', `Bearer ${tokenFor('ADMIN', [ADMIN_ONLY])}`);
         expect(allowed.status).toBe(200);
     });
 

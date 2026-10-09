@@ -10,7 +10,9 @@
 
 /** Constraint / index name → user-facing message. */
 export const CONSTRAINT_MESSAGES: Record<string, string> = {
+    // @auth-start
     uq_usermaster_username: 'A user with this username already exists.',
+    // @auth-end
 };
 
 /** SQLSTATEs that mean "the value the client sent cannot be stored". */

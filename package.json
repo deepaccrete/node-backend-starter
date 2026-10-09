@@ -24,6 +24,7 @@
     "migrate:status": "tsx scripts/migrate.ts status",
     "create-admin": "tsx scripts/create-admin.ts",
     "gen:openapi": "tsx scripts/gen-openapi.ts",
+    "init-project": "tsx scripts/init-project.ts",
     "prepare": "husky"
   },
   "dependencies": {

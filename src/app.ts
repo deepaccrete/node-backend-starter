@@ -9,7 +9,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// @auth-start
 import cookieParser from 'cookie-parser';
+// @auth-end
 import cors from 'cors';
 import express, { type Express } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -96,7 +98,9 @@ export async function createApp(): Promise<Express> {
     // The limit is a denial-of-service control.
     app.use(express.json({ limit: '2mb' }));
     app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+    // @auth-start
     app.use(cookieParser());
+    // @auth-end
 
     // ─── HTTP logging ─────────────────────────────────────────────────
     app.use(
@@ -107,8 +111,10 @@ export async function createApp(): Promise<Express> {
     );
 
     // ─── Rate limiting ────────────────────────────────────────────────
+    // @auth-start
     // Login is worth brute-forcing, so /auth has its own, stricter bucket.
     app.use(`${env.API_PREFIX}/auth`, limiter(env.rateLimit.authMax));
+    // @auth-end
     app.use(env.API_PREFIX, limiter(env.rateLimit.max));
 
     // ─── Static uploads ───────────────────────────────────────────────

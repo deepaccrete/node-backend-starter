@@ -14,6 +14,7 @@ import { ERROR_CODES } from '../utils/errorCodes.js';
 
 export const registry = new OpenAPIRegistry();
 
+// @auth-start
 export const bearerAuth = registry.registerComponent('securitySchemes', 'bearerAuth', {
     type: 'http',
     scheme: 'bearer',
@@ -22,6 +23,7 @@ export const bearerAuth = registry.registerComponent('securitySchemes', 'bearerA
 
 /** `security` value for endpoints that need a signed-in user. */
 export const requiresAuth = [{ [bearerAuth.name]: [] }];
+// @auth-end
 
 export const FieldErrorSchema = z
     .object({ field: z.string(), message: z.string() })

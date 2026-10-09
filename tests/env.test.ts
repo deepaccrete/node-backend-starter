@@ -13,16 +13,20 @@ const valid = {
     DB_NAME: 'app',
     DB_USER: 'app',
     DB_PASSWORD: '',
+    // @auth-start
     JWT_ACCESS_SECRET: 'a'.repeat(32),
     JWT_REFRESH_SECRET: 'b'.repeat(32),
+    // @auth-end
 };
 
 describe('parseEnv', () => {
     it('accepts a complete configuration and applies the agreed defaults', () => {
         const env = parseEnv(valid);
         expect(env.db.port).toBe(5432);
+        // @auth-start
         expect(env.auth.accessTtlSeconds).toBe(15 * 60);
         expect(env.auth.refreshTtlSeconds).toBe(7 * 24 * 60 * 60);
+        // @auth-end
         expect(env.db.ssl).toBe(false);
     });
 
@@ -36,12 +40,14 @@ describe('parseEnv', () => {
         expect(() => parseEnv(rest)).toThrow(/DB_PASSWORD/);
     });
 
+    // @auth-start
     it('rejects short or shared token secrets', () => {
         expect(() => parseEnv({ ...valid, JWT_ACCESS_SECRET: 'short' })).toThrow(/at least 32/);
         expect(() => parseEnv({ ...valid, JWT_REFRESH_SECRET: valid.JWT_ACCESS_SECRET })).toThrow(
             /must differ/
         );
     });
+    // @auth-end
 
     it('requires a CORS allowlist in production', () => {
         expect(() => parseEnv({ ...valid, NODE_ENV: 'production' })).toThrow(/CORS_ORIGIN/);

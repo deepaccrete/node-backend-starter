@@ -16,7 +16,9 @@ import { z } from 'zod';
 
 import { project } from './project.js';
 
+// @auth-start
 const MIN_SECRET_LENGTH = 32;
+// @auth-end
 
 const int = (fallback: number) => z.coerce.number().int().positive().default(fallback);
 const required = (name: string) =>
@@ -68,6 +70,7 @@ const schema = z
         // Path to the CA certificate of a managed database, when it is not in the system store.
         DB_SSL_CA: z.string().optional(),
 
+        // @auth-start
         JWT_ACCESS_SECRET: required('JWT_ACCESS_SECRET').min(
             MIN_SECRET_LENGTH,
             `JWT_ACCESS_SECRET must be at least ${MIN_SECRET_LENGTH} characters`
@@ -80,6 +83,7 @@ const schema = z
         REFRESH_TOKEN_TTL_DAYS: int(7),
         LOGIN_MAX_FAILURES: int(5),
         LOGIN_LOCK_MINUTES: int(15),
+        // @auth-end
 
         CORS_ORIGIN: list,
 
@@ -88,11 +92,14 @@ const schema = z
 
         RATE_LIMIT_WINDOW_MS: int(15 * 60 * 1000),
         RATE_LIMIT_MAX: int(100),
+        // @auth-start
         AUTH_RATE_LIMIT_MAX: int(20),
+        // @auth-end
 
         UPLOAD_MAX_BYTES: int(5 * 1024 * 1024),
     })
     .superRefine((value, ctx) => {
+        // @auth-start
         // Sharing one secret lets a refresh token verify as an access token.
         if (value.JWT_ACCESS_SECRET === value.JWT_REFRESH_SECRET) {
             ctx.addIssue({
@@ -101,6 +108,7 @@ const schema = z
                 message: 'JWT_REFRESH_SECRET must differ from JWT_ACCESS_SECRET',
             });
         }
+        // @auth-end
         if (value.NODE_ENV === 'production' && value.CORS_ORIGIN.length === 0) {
             ctx.addIssue({
                 code: 'custom',
@@ -148,6 +156,7 @@ export function parseEnv(source: Record<string, string | undefined>) {
                       }
                     : false,
         },
+        // @auth-start
         auth: {
             accessSecret: v.JWT_ACCESS_SECRET,
             refreshSecret: v.JWT_REFRESH_SECRET,
@@ -156,12 +165,15 @@ export function parseEnv(source: Record<string, string | undefined>) {
             maxFailures: v.LOGIN_MAX_FAILURES,
             lockMinutes: v.LOGIN_LOCK_MINUTES,
         },
+        // @auth-end
         corsOrigins: v.CORS_ORIGIN,
         log: { level: v.LOG_LEVEL, dir: v.LOG_DIR },
         rateLimit: {
             windowMs: v.RATE_LIMIT_WINDOW_MS,
             max: v.RATE_LIMIT_MAX,
+            // @auth-start
             authMax: v.AUTH_RATE_LIMIT_MAX,
+            // @auth-end
         },
         uploadMaxBytes: v.UPLOAD_MAX_BYTES,
     };

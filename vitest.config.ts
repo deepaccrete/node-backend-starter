@@ -15,8 +15,10 @@ export default defineConfig({
             DB_NAME: 'app_test',
             DB_USER: 'test',
             DB_PASSWORD: '',
+            // @auth-start
             JWT_ACCESS_SECRET: 'test-access-secret-0123456789abcdef0123',
             JWT_REFRESH_SECRET: 'test-refresh-secret-0123456789abcdef012',
+            // @auth-end
         },
         coverage: {
             provider: 'v8',

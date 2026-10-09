@@ -47,25 +47,11 @@ describe('error envelope', () => {
 
     it('answers malformed JSON with INVALID_JSON', async () => {
         const res = await request(app)
-            .post('/api/v1/auth/login')
+            .post('/api/v1/health')
             .set('Content-Type', 'application/json')
             .send('{bad');
         expect(res.status).toBe(400);
         expect(res.body).toMatchObject({ code: 'INVALID_JSON' });
-    });
-
-    it('returns one message per invalid field', async () => {
-        const res = await request(app).post('/api/v1/auth/login').send({ username: '   ' });
-        expect(res.status).toBe(400);
-        expect(res.body).toMatchObject({
-            success: false,
-            code: 'VALIDATION_FAILED',
-            message: 'Validation failed',
-            errors: [
-                { field: 'username', message: 'Enter your username' },
-                { field: 'password', message: 'Enter your password' },
-            ],
-        });
     });
 
     it('echoes a request id on every response', async () => {
@@ -84,15 +70,24 @@ describe('OpenAPI', () => {
         };
         expect(Object.keys(doc.paths)).toEqual(
             expect.arrayContaining([
+                // @auth-start
                 '/auth/login',
                 '/auth/refresh',
                 '/auth/logout',
                 '/auth/me',
+                // @auth-end
                 '/health',
             ])
         );
         expect(Object.keys(doc.components.schemas)).toEqual(
-            expect.arrayContaining(['ErrorResponse', 'User', 'Session', 'LoginRequest'])
+            expect.arrayContaining([
+                // @auth-start
+                'ErrorResponse',
+                'User',
+                'Session',
+                'LoginRequest',
+                // @auth-end
+            ])
         );
     });
 });

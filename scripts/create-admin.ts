@@ -17,6 +17,7 @@ import { pool } from '../src/config/database.js';
 import { UserModel } from '../src/models/auth/user.model.js';
 import { hashPassword, normaliseUsername } from '../src/services/auth.service.js';
 import { isUniqueViolation } from '../src/utils/pgError.js';
+import { project } from '../src/config/project.js';
 
 // Policy for this script (Proposed, confirm with the TL): NIST SP 800-63B minimum.
 const MIN_PASSWORD = 8;
@@ -41,7 +42,7 @@ function ask(question: string, hidden = false): Promise<string> {
 }
 
 async function main() {
-    console.log('\nCreate a TPJP dashboard Administrator\n');
+    console.log(`\nCreate a ${project.title} Administrator\n`);
 
     const username = normaliseUsername(await ask('Username: '));
     if (!/^[a-z0-9._-]{3,64}$/.test(username)) {
