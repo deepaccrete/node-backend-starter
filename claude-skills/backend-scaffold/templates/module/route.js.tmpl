@@ -1,0 +1,97 @@
+/**
+ * {{ResourceLabel}} routes.
+ *
+ * Mounted automatically at {{API_PREFIX}}{{ROUTE_PATH}} by the route loader —
+ * the `{ path, router }` export at the bottom IS the registration. There is no
+ * registry file to update.
+ *
+ * A route file owns the URL shape, the middleware chain and the validation
+ * rules. Handler bodies live in the controller; SQL lives in the model.
+ */
+
+const { Router } = require('express');
+const { body, param, query } = require('express-validator');
+
+const {{ResourcePascal}}Controller = require('../../controllers/{{domain}}/{{resource}}.controller');
+const validate = require('../../middleware/validate');
+
+const router = Router();
+
+// ─── Access control ───────────────────────────────────────────────────
+// These endpoints are OPEN. This scaffold ships no authentication, because what
+// counts as a user differs per project.
+//
+// When you add auth, write the middleware once and apply it to the whole file
+// rather than per-route — a route added later then inherits it by default
+// instead of being silently public:
+//
+//     const { authenticate } = require('../../middleware/auth');
+//     router.use(authenticate);
+
+// ─── Field rules ──────────────────────────────────────────────────────
+// Kept together so the contract of this resource is readable in one place, and
+// shared between POST and PUT so the two can never drift apart.
+//
+// Match these to the REAL column types once you have replaced the sample
+// columns in the migration: a varchar(150) column wants isLength({ max: 150 }),
+// so an over-long paste is a clean 400 instead of a database error.
+
+// Truly optional — blank means "not set", so skip validation when absent or empty.
+const optional = (chain) => chain.optional({ nullable: true, checkFalsy: true });
+
+// REQUIRED but patchable: an omitted key keeps the stored value, so it is
+// skipped — but an explicit "" must still be rejected, because the UPDATE
+// COALESCEs and would otherwise write an empty string over real data.
+const patchable = (chain) => chain.optional({ nullable: true });
+
+const idParam = param('id').isInt({ min: 1 }).withMessage('Invalid id');
+
+const nameRule = (chain) =>
+    chain
+        .trim()
+        .notEmpty()
+        .withMessage('{{ResourceLabel}} name is required')
+        .bail()
+        .isLength({ min: 2, max: 150 })
+        .withMessage('{{ResourceLabel}} name must be 2–150 characters');
+
+// ─── Read ─────────────────────────────────────────────────────────────
+
+router.get(
+    '/',
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 100 }),
+    query('isactive').optional().isInt({ min: 0, max: 1 }),
+    validate,
+    {{ResourcePascal}}Controller.list
+);
+
+router.get('/:id', idParam, validate, {{ResourcePascal}}Controller.getOne);
+
+// ─── Write ────────────────────────────────────────────────────────────
+
+router.post(
+    '/',
+    nameRule(body('{{resource}}name')),
+    optional(body('description').trim().isLength({ max: 500 }).withMessage('Description is too long')),
+    body('isactive').optional().isInt({ min: 0, max: 1 }),
+    validate,
+    {{ResourcePascal}}Controller.create
+);
+
+router.put(
+    '/:id',
+    idParam,
+    patchable(nameRule(body('{{resource}}name'))),
+    optional(body('description').trim().isLength({ max: 500 }).withMessage('Description is too long')),
+    body('isactive').optional().isInt({ min: 0, max: 1 }),
+    validate,
+    {{ResourcePascal}}Controller.update
+);
+
+// Deletion is soft, but it is still the action that makes a record disappear
+// from every list in the product. If this project grows roles, this is the
+// first route that should require one.
+router.delete('/:id', idParam, validate, {{ResourcePascal}}Controller.remove);
+
+module.exports = { path: '{{ROUTE_PATH}}', router };

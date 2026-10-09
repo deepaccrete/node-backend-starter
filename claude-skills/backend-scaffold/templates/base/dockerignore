@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+logs
+coverage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose.yml
+README.md
+tests
+src/public/**

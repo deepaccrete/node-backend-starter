@@ -1,0 +1,109 @@
+/**
+ * {{ResourceLabel}} controller.
+ *
+ * Thin by rule: read the request, call ONE model function, pick a response
+ * helper. No SQL here, and no business rule that another caller (a script, a
+ * job, a second endpoint) would also need — that belongs in the model.
+ *
+ * Every handler wraps its body in try/catch and forwards to `next(err)`.
+ * Express 4 does not await handlers, so an async function that throws without
+ * this rejects a promise nobody is watching: the request hangs until the client
+ * gives up and nothing is logged.
+ */
+
+const {{ResourcePascal}}Model = require('../../models/{{domain}}/{{resource}}.model');
+const {
+    success,
+    created,
+    paginated,
+    notFound,
+    badRequest,
+    parsePagination,
+} = require('../../utils/response');
+
+/**
+ * Who to record in `createdby` / `updatedby`.
+ *
+ * This scaffold has no authentication, so there is nobody to attribute a write
+ * to and the audit columns record 0. The moment you add auth and set `req.user`,
+ * this starts recording real ids without any other file changing.
+ */
+const actorId = (req) => req.user?.id ?? 0;
+
+/**
+ * Blocking reasons the model returns instead of deleting, mapped to wording the
+ * user can act on. Keeping the text here and the RULE in the model means the
+ * model stays reusable outside HTTP while the copy stays reviewable in one place.
+ */
+const DELETE_ERRORS = {
+    IN_USE: 'This {{resourceLower}} is still referenced by other records. Remove those links before deleting it.',
+};
+
+const {{ResourcePascal}}Controller = {
+    list: async (req, res, next) => {
+        try {
+            const { page, limit, offset, search, sortBy, sortOrder } = parsePagination(req.query);
+
+            const { rows, total } = await {{ResourcePascal}}Model.getAll({
+                limit,
+                offset,
+                search,
+                sortBy,
+                sortOrder,
+                isactive: req.query.isactive,
+            });
+
+            return paginated(res, rows, total, page, limit);
+        } catch (err) {
+            next(err);
+        }
+    },
+
+    getOne: async (req, res, next) => {
+        try {
+            const row = await {{ResourcePascal}}Model.getById(req.params.id);
+            if (!row) return notFound(res, '{{ResourceLabel}} not found');
+            return success(res, row);
+        } catch (err) {
+            next(err);
+        }
+    },
+
+    create: async (req, res, next) => {
+        try {
+            const row = await {{ResourcePascal}}Model.create(actorId(req), req.body);
+            return created(res, row, '{{ResourceLabel}} created');
+        } catch (err) {
+            next(err);
+        }
+    },
+
+    update: async (req, res, next) => {
+        try {
+            const row = await {{ResourcePascal}}Model.update(req.params.id, actorId(req), req.body);
+            if (!row) return notFound(res, '{{ResourceLabel}} not found');
+            return success(res, row, '{{ResourceLabel}} updated');
+        } catch (err) {
+            next(err);
+        }
+    },
+
+    remove: async (req, res, next) => {
+        try {
+            const result = await {{ResourcePascal}}Model.softDelete(req.params.id, actorId(req));
+
+            // The model answers with one of three things, and each maps to a
+            // different status: null = no such row (404), a string = a business
+            // rule refused (400), a row = deleted (200).
+            if (result === null) return notFound(res, '{{ResourceLabel}} not found');
+            if (typeof result === 'string') {
+                return badRequest(res, DELETE_ERRORS[result] || 'This {{resourceLower}} cannot be deleted.');
+            }
+            return success(res, result, '{{ResourceLabel}} deleted');
+        } catch (err) {
+            next(err);
+        }
+    },
+};
+
+module.exports = {{ResourcePascal}}Controller;

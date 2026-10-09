@@ -1,0 +1,184 @@
+/**
+ * {{ResourceLabel}} model — every SQL statement for `{{table}}`.
+ *
+ * Rules that apply to EVERY query in this file, without exception:
+ *
+ *   1. `isdeleted = 0` on every SELECT and on the WHERE of every UPDATE. Rows
+ *      are soft-deleted, so without it a "deleted" record reappears.
+ *   2. Values go through `$1, $2, …`. Never interpolate a value into the SQL
+ *      string. When an IDENTIFIER must vary (a sort column), whitelist it with
+ *      `sortColumn()` — identifiers cannot be parameterized.
+ *   3. RETURNING lists explicit columns, never `*`. `*` leaks whatever column
+ *      someone adds later, including ones that should never reach a client.
+ *
+ * Models never touch `req` or `res`. That is what lets a script or a scheduled
+ * job reuse them.
+ *
+ * The column lists below match the SAMPLE columns in the generated migration.
+ * When you replace those with the real ones, update every statement here to
+ * match — a model and a migration that disagree fail at runtime, not at boot.
+ */
+
+const { query, withTransaction, sortColumn } = require('../../config/database');
+
+// Columns a client may sort by. Anything else falls back to the default.
+const SORTABLE = ['{{resource}}name', 'createdat', 'updatedat'];
+
+const {{ResourcePascal}}Model = {
+    /**
+     * One page of rows plus the total, for `paginated()`.
+     *
+     * The count is a separate query rather than a window function because the
+     * two have different shapes: the page needs joins for display columns, the
+     * count needs none, and running the joins twice is the slower option on a
+     * large table.
+     */
+    getAll: async ({ limit, offset, search, sortBy, sortOrder, isactive }) => {
+        const params = [`%${search || ''}%`];
+        let filters = '';
+
+        if (isactive !== undefined && isactive !== '') {
+            params.push(parseInt(isactive, 10));
+            filters += ` AND t.isactive = $${params.length}`;
+        }
+
+        const orderBy = sortColumn(sortBy, SORTABLE, '{{resource}}name');
+        const direction = sortOrder === 'ASC' ? 'ASC' : 'DESC';
+
+        params.push(limit, offset);
+        const last = params.length;
+
+        const { rows } = await query(
+            `SELECT t.id, t.{{resource}}code, t.{{resource}}name, t.description,
+                    t.isactive, t.createdat, t.updatedat
+               FROM {{table}} t
+              WHERE t.isdeleted = 0
+                AND ($1 = '%%' OR t.{{resource}}name ILIKE $1 OR t.{{resource}}code ILIKE $1)
+                ${filters}
+              ORDER BY t.${orderBy} ${direction}
+              LIMIT $${last - 1} OFFSET $${last}`,
+            params
+        );
+
+        // Same WHERE as above minus pagination — if you change one, change both.
+        const countParams = params.slice(0, last - 2);
+        const { rows: countRows } = await query(
+            `SELECT COUNT(*) AS total
+               FROM {{table}} t
+              WHERE t.isdeleted = 0
+                AND ($1 = '%%' OR t.{{resource}}name ILIKE $1 OR t.{{resource}}code ILIKE $1)
+                ${filters}`,
+            countParams
+        );
+
+        return { rows, total: parseInt(countRows[0].total, 10) };
+    },
+
+    getById: async (id) => {
+        const { rows } = await query(
+            `SELECT id, {{resource}}code, {{resource}}name, description,
+                    isactive, createdby, createdat, updatedby, updatedat
+               FROM {{table}}
+              WHERE id = $1 AND isdeleted = 0`,
+            [id]
+        );
+        return rows[0] || null;
+    },
+
+    // Not `async`: it returns withTransaction's promise directly, and wrapping
+    // that in another async frame adds a tick for nothing.
+    create: (userId, data) => {
+        // A transaction because the code is derived from rows this statement is
+        // about to add to. Reading the max and inserting must be one unit, or two
+        // concurrent creates read the same max and collide on the unique index.
+        return withTransaction(async (client) => {
+            // Serialises code generation for this table across every connection,
+            // and releases automatically when the transaction ends.
+            await client.query('SELECT pg_advisory_xact_lock($1)', [{{LOCK_CLASS}}]);
+
+            // Deleted rows count deliberately: the unique index still holds them,
+            // and a code that once existed must never be handed out twice.
+            // verify-api: allow missing-soft-delete-filter — see above
+            const { rows: seqRows } = await client.query(
+                `SELECT COALESCE(MAX(SUBSTRING({{resource}}code FROM '[0-9]+$')::int), 0) + 1 AS next
+                   FROM {{table}}`
+            );
+            const code = `{{CODE_PREFIX}}-${String(seqRows[0].next).padStart(4, '0')}`;
+
+            const { rows } = await client.query(
+                `INSERT INTO {{table}}
+                     ({{resource}}code, {{resource}}name, description,
+                      isactive, createdby, updatedby)
+                 VALUES ($1, $2, $3, $4, $5, $5)
+                 RETURNING id, {{resource}}code, {{resource}}name, description,
+                           isactive, createdby, createdat`,
+                [code, data.{{resource}}name, data.description || null, data.isactive ?? 1, userId]
+            );
+            return rows[0];
+        });
+    },
+
+    /**
+     * Partial update. COALESCE means an omitted field keeps its stored value, so
+     * the caller can PATCH one field without resending the record.
+     *
+     * That is exactly why the route rejects an explicit "" for required fields:
+     * COALESCE only protects against NULL, and would happily write an empty
+     * string over real data.
+     */
+    update: async (id, userId, data) => {
+        const { rows } = await query(
+            `UPDATE {{table}} SET
+                    {{resource}}name = COALESCE($3, {{resource}}name),
+                    description      = COALESCE($4, description),
+                    isactive         = COALESCE($5, isactive),
+                    updatedby        = $2,
+                    updatedat        = NOW()
+              WHERE id = $1 AND isdeleted = 0
+              RETURNING id, {{resource}}code, {{resource}}name, description,
+                        isactive, updatedby, updatedat`,
+            [id, userId, data.{{resource}}name, data.description, data.isactive]
+        );
+        return rows[0] || null;
+    },
+
+    /**
+     * Soft-delete, refusing when the record is still referenced.
+     *
+     * @returns {null|string|object}
+     *   null     no such row             → controller answers 404
+     *   'IN_USE' a business rule refused → controller answers 400
+     *   object   the deleted row         → controller answers 200
+     *
+     * Returning a REASON rather than throwing keeps the model usable outside
+     * HTTP while letting the controller own the wording.
+     */
+    softDelete: async (id, userId) => {
+        const existing = await query(`SELECT id FROM {{table}} WHERE id = $1 AND isdeleted = 0`, [
+            id,
+        ]);
+        if (!existing.rows[0]) return null;
+
+        // Referential guards go here — one query per relationship that would be
+        // orphaned. Example:
+        //
+        // const used = await query(
+        //     `SELECT 1 FROM someothertable
+        //       WHERE {{resource}}id = $1 AND isdeleted = 0
+        //       LIMIT 1`,
+        //     [id]
+        // );
+        // if (used.rows[0]) return 'IN_USE';
+
+        const { rows } = await query(
+            `UPDATE {{table}}
+                SET isdeleted = 1, isactive = 0, updatedby = $2, updatedat = NOW()
+              WHERE id = $1 AND isdeleted = 0
+              RETURNING id, {{resource}}code, {{resource}}name`,
+            [id, userId]
+        );
+        return rows[0] || null;
+    },
+};
+
+module.exports = {{ResourcePascal}}Model;

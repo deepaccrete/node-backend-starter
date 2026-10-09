@@ -1,0 +1,39 @@
+-- {{DATE}}_create_{{table}} — {{ResourceLabel}}
+--
+-- ⚠ THESE ARE SAMPLE COLUMNS. Replace them with this resource's real ones
+--   before running `npm run migrate`, and mirror the same list in the model's
+--   SELECT / INSERT / UPDATE statements and the route's validators.
+--
+-- Conventions this table follows (see references/conventions.md):
+--   * lowercase column names, no underscores
+--   * booleans are smallint 0/1
+--   * soft delete via isdeleted; every SELECT filters isdeleted = 0
+--   * audit columns: createdby / createdat / updatedby / updatedat
+--   * constraints are NAMED so utils/pgError.js can map them to a user message
+
+CREATE TABLE IF NOT EXISTS {{table}} (
+    id             serial PRIMARY KEY,
+    {{resource}}code varchar(30)  NOT NULL,
+    {{resource}}name varchar(150) NOT NULL,
+    description    varchar(500),
+    isactive       smallint     NOT NULL DEFAULT 1,
+    createdby      integer      NOT NULL DEFAULT 1,
+    createdat      timestamp    NOT NULL DEFAULT NOW(),
+    updatedby      integer      NOT NULL DEFAULT 1,
+    updatedat      timestamp    NOT NULL DEFAULT NOW(),
+    isdeleted      smallint     NOT NULL DEFAULT 0
+);
+
+-- Unique among LIVE rows only: a soft-deleted record must not reserve its code
+-- or name forever. The index is NAMED so pgError.js can turn a collision into
+-- readable wording instead of a raw Postgres message.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_{{table}}_code
+    ON {{table}} ({{resource}}code) WHERE isdeleted = 0;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_{{table}}_name
+    ON {{table}} (LOWER({{resource}}name)) WHERE isdeleted = 0;
+
+-- Every list query filters `isdeleted = 0` and usually orders by name, so the
+-- common page is served from this index rather than a sequential scan.
+CREATE INDEX IF NOT EXISTS ix_{{table}}_live
+    ON {{table}} ({{resource}}name) WHERE isdeleted = 0;
