@@ -1,0 +1,60 @@
+// =============================================================================
+// {{FILE}}                         (MongoDB)
+//
+// WHAT   {{WHAT}}
+// WHY    {{WHY}}
+//
+// Applies one or more <collection>.collection.json specs: creates the collection
+// with a $jsonSchema validator (or updates the validator), then creates indexes.
+// Re-runnable. Needs the official `mongodb` driver. Usage:
+//   MONGODB_URI=... node {{FILE}}
+// =============================================================================
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const { MongoClient } = require('mongodb');
+
+const SPECS = [{{SPEC_PATHS}}]; // e.g. ['./usermaster.collection.json']
+
+const BSON = { int: 'int', long: 'long', decimal: 'decimal', string: 'string', date: 'date', array: 'array', object: 'object' };
+
+function toValidator(spec) {
+  const properties = {};
+  const required = [];
+  for (const [name, f] of Object.entries(spec.fields)) {
+    const p = { bsonType: BSON[f.type] };
+    if (f.enum) p.enum = f.enum;
+    if (f.maxlength) p.maxLength = f.maxlength;
+    if (f.pattern) p.pattern = f.pattern;
+    if (f.items) p.items = { bsonType: BSON[f.items.type] || f.items.type };
+    properties[name] = p;
+    if (f.required) required.push(name);
+  }
+  return { $jsonSchema: { bsonType: 'object', required, properties } };
+}
+
+async function apply(db, spec) {
+  const validator = toValidator(spec);
+  const exists = (await db.listCollections({ name: spec.collection }).toArray()).length > 0;
+  if (exists) await db.command({ collMod: spec.collection, validator, validationLevel: 'moderate' });
+  else await db.createCollection(spec.collection, { validator });
+  for (const ix of spec.indexes || []) {
+    const { keys, ...opts } = ix;
+    await db.collection(spec.collection).createIndex(keys, opts);
+  }
+  console.log(`${exists ? 'updated' : 'created'} ${spec.collection} (${(spec.indexes || []).length} indexes)`);
+}
+
+(async () => {
+  const client = new MongoClient(process.env.MONGODB_URI);
+  await client.connect();
+  try {
+    const db = client.db();
+    for (const p of SPECS) await apply(db, JSON.parse(fs.readFileSync(path.resolve(__dirname, p), 'utf8')));
+  } finally {
+    await client.close();
+  }
+})().catch((e) => { console.error(e); process.exit(1); });
+
+// ROLLBACK (commented; run by hand only to undo):
+// db.getCollection('{{COLLECTION}}').drop()

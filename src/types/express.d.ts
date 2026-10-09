@@ -19,6 +19,7 @@ declare global {
             /** Correlation id, echoed in X-Request-Id. */
             id: string;
             startedAt: number;
+
             // @auth-start
             user?: AuthUser;
             // @auth-end

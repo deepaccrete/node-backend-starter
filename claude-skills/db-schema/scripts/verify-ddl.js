@@ -1,546 +1,606 @@
 #!/usr/bin/env node
 /**
- * Lint authored DDL against the house rules and the deviation register.
+ * Checks a migration against the house rules in references/conventions.md.
  *
- *   node verify-ddl.js <file.sql> [more.sql ...]
- *   node verify-ddl.js --dir ./migrations
+ *   node verify-ddl.js <file.sql>  [--dialect postgres|mysql|mssql|sqlite]
+ *   node verify-ddl.js <file.collection.json>          (MongoDB collection spec)
  *
- * Checks the things that are cheap to get wrong and expensive to find later: a
- * `boolean` the frontend will read as false, a status column with no CHECK that
- * silently accepts a typo, a unique constraint that is not org-scoped and so
- * fails in an unrelated tenant, an `ADD COLUMN NOT NULL` that dies on apply.
- *
- * Exits non-zero on any ERROR. Several rules have legitimate exceptions — a
- * platform-level table has no `organizationid`, an append-only log has no
- * `isdeleted` — so each finding names the rule, to be justified rather than
- * silenced.
- *
- * No dependencies, and it never connects to a database.
+ * ERROR = a [must] rule is broken. WARN = a [default] rule, fix it or explain it.
+ * Exit code 1 when there is at least one ERROR. No dependencies; never connects
+ * to a database. It reads SQL with regular expressions, so it checks the shapes
+ * this skill writes, not every possible SQL statement.
  */
-
+'use strict';
 const fs = require('fs');
 const path = require('path');
 
-const findings = [];
-const add = (file, line, level, rule, message) =>
-    findings.push({ file, line, level, rule, message });
-
-const parseArgs = (argv) => {
-    const args = { files: [] };
-    for (let i = 0; i < argv.length; i++) {
-        const token = argv[i];
-        if (token === '--dir') {
-            args.dir = argv[++i];
-        } else if (token.startsWith('--')) {
-            args[token.slice(2)] = true;
-        } else {
-            args.files.push(token);
-        }
-    }
-    return args;
-};
-
-/** Blank out comments but keep the newlines, so line numbers stay true. */
-const stripComments = (sql) =>
-    sql
-        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-        .replace(/--[^\n]*/g, (m) => ' '.repeat(m.length));
-
-const lineOf = (sql, index) => sql.slice(0, index).split('\n').length;
-
-const balanced = (sql, start) => {
-    let depth = 0;
-    let quote = null;
-    for (let i = start; i < sql.length; i++) {
-        const ch = sql[i];
-        if (quote) {
-            if (ch === quote) quote = null;
-            continue;
-        }
-        if (ch === "'" || ch === '"') quote = ch;
-        else if (ch === '(') depth++;
-        else if (ch === ')') {
-            depth--;
-            if (depth === 0) return { body: sql.slice(start + 1, i), end: i };
-        }
-    }
-    return null;
-};
-
-/**
- * Split a table body on top-level commas, keeping each item's offset.
- *
- * The offset is what lets a finding point at the column's own line instead of at
- * the CREATE TABLE — a linter that reports twenty problems on line 3 is one the
- * reader has to re-find by hand.
- */
-const splitTop = (body) => {
-    const parts = [];
-    let depth = 0;
-    let quote = null;
-    let current = '';
-    let start = 0;
-    for (let i = 0; i < body.length; i++) {
-        const ch = body[i];
-        if (quote) {
-            current += ch;
-            if (ch === quote) quote = null;
-            continue;
-        }
-        if (ch === "'" || ch === '"') quote = ch;
-        else if (ch === '(') depth++;
-        else if (ch === ')') depth--;
-        else if (ch === ',' && depth === 0) {
-            if (current.trim()) parts.push({ text: current.trim(), offset: start + (current.length - current.trimStart().length) });
-            current = '';
-            start = i + 1;
-            continue;
-        }
-        current += ch;
-    }
-    if (current.trim())
-        parts.push({ text: current.trim(), offset: start + (current.length - current.trimStart().length) });
-    return parts;
-};
-
-const CONSTRAINT_START =
-    /^(constraint|primary\s+key|foreign\s+key|unique|check|exclude|like)\b/i;
-
-const LADDER = new Set(['10', '15', '20', '30', '50', '64', '100', '150', '200', '255', '500']);
-
+const LADDER = [20, 30, 50, 64, 100, 150, 200, 255, 500];
 const AUDIT = ['createdby', 'createdat', 'updatedby', 'updatedat', 'isdeleted'];
+const APPEND_ONLY_AUDIT = ['createdby', 'createdat'];
+const NAME_RE = /^[a-z][a-z0-9]*$/;
+const BOOL_NAME_RE = /^(is|can|allow|has)[a-z0-9]+$/;
 
-const normaliseType = (raw) => {
-    let t = raw.toLowerCase().replace(/\s+/g, ' ').trim();
-    t = t.replace(/^character varying/, 'varchar');
-    t = t.replace(/^timestamp\s*(\(\d+\))?\s*without time zone/, 'timestamp');
-    t = t.replace(/^timestamp\s*(\(\d+\))?\s*with time zone/, 'timestamptz');
-    return t;
-};
+const findings = [];
+const err = (rule, where, msg) => findings.push({ level: 'ERROR', rule, where, msg });
+const warn = (rule, where, msg) => findings.push({ level: 'WARN', rule, where, msg });
 
-const baseType = (type) => type.replace(/\(.*$/, '').trim();
+// usermaster -> userid; invoicelineitem -> invoicelineitemid
+const expectedPk = (table) => table.replace(/master$/, '') + 'id';
 
-const checkFile = (file) => {
-    const raw = fs.readFileSync(file, 'utf8');
-    const sql = stripComments(raw);
-    const label = path.basename(file);
+// ---------------------------------------------------------------- SQL helpers
 
-    // ---- whole-file rules -------------------------------------------------
-
-    if (/create\s+trigger/i.test(sql)) {
-        const i = sql.search(/create\s+trigger/i);
-        add(label, lineOf(sql, i), 'ERROR', 'no-triggers',
-            'CREATE TRIGGER — there are zero triggers across 111 tables. Nothing is maintained by the database: `updatedat` is written by the application on every UPDATE. Make the application change instead.');
-    }
-
-    let m;
-    const enumRe = /create\s+type\s+[\w.".]+\s+as\s+enum/gi;
-    while ((m = enumRe.exec(sql)) !== null)
-        add(label, lineOf(sql, m.index), 'ERROR', 'no-enum-types',
-            'CREATE TYPE … AS ENUM — there are none in the schema. States are `varchar(20|30)` holding lower_snake_case tokens plus a `chk_*` CHECK, so widening one is an app change rather than an ALTER TYPE.');
-
-    const cascadeRe = /on\s+delete\s+(cascade|set\s+null|set\s+default)/gi;
-    while ((m = cascadeRe.exec(sql)) !== null)
-        add(label, lineOf(sql, m.index), 'ERROR', 'no-cascade',
-            `ON DELETE ${m[1].toUpperCase()} — all 304 existing FKs use the default NO ACTION. Deletes are soft, so cascade semantics are dead code that goes live the day someone hard-deletes.`);
-
-    const dropRe = /^\s*drop\s+(table|index|column|constraint)/gim;
-    while ((m = dropRe.exec(sql)) !== null)
-        add(label, lineOf(sql, m.index), 'ERROR', 'rollback-commented',
-            'An uncommented DROP in a hand-applied file. Migrations are pasted whole into a console — the rollback section must stay commented out.');
-
-    const createTableRe = /create\s+table\s+(if\s+not\s+exists\s+)?(?:only\s+)?([\w.".]+)\s*\(/gi;
-    const tableStarts = [];
-    while ((m = createTableRe.exec(sql)) !== null) tableStarts.push({ m, index: m.index });
-
-    const createIndexRe = /create\s+(unique\s+)?index\s+(concurrently\s+)?(if\s+not\s+exists\s+)?([\w"]+)?\s*on\s+(?:only\s+)?([\w.".]+)\s*([\s\S]*?);/gi;
-    const indexes = [];
-    while ((m = createIndexRe.exec(sql)) !== null) {
-        const idx = {
-            unique: Boolean(m[1]),
-            concurrent: Boolean(m[2]),
-            guarded: Boolean(m[3]),
-            name: (m[4] || '').replace(/"/g, '').toLowerCase(),
-            table: m[5].replace(/"/g, '').split('.').pop().toLowerCase(),
-            body: m[6].replace(/\s+/g, ' ').trim(),
-            line: lineOf(sql, m.index),
-        };
-        indexes.push(idx);
-        if (!idx.guarded)
-            add(label, idx.line, 'ERROR', 'idempotent',
-                `CREATE INDEX without IF NOT EXISTS (${idx.name || idx.table}) — the file is applied by hand and may be applied twice.`);
-        if (!idx.name)
-            add(label, idx.line, 'WARN', 'named-objects',
-                `Unnamed index on ${idx.table} — name it \`${idx.unique ? 'uq' : 'idx'}_<table>_<cols>\` so it can be dropped without a lookup.`);
-        else if (!/^(idx|uq|ux)_/.test(idx.name))
-            add(label, idx.line, 'WARN', 'named-objects',
-                `Index "${idx.name}" — the prefixes in use are idx_* (65) for lookups and uq_*/ux_* (29) for unique.`);
-        if (idx.concurrent && !/^\s*$/.test(''))
-            add(label, idx.line, 'NOTE', 'concurrent-index',
-                'CREATE INDEX CONCURRENTLY cannot run inside a transaction block — keep it in its own section and say so in a comment.');
-    }
-
-    // ---- ALTER TABLE ------------------------------------------------------
-
-    const addColRe = /alter\s+table\s+(?:only\s+)?([\w.".]+)\s+add\s+column\s+(if\s+not\s+exists\s+)?([\w"]+)\s+([\s\S]*?);/gi;
-    while ((m = addColRe.exec(sql)) !== null) {
-        const line = lineOf(sql, m.index);
-        const col = m[3].replace(/"/g, '').toLowerCase();
-        const definition = m[4].replace(/\s+/g, ' ').trim();
-        if (!m[2])
-            add(label, line, 'ERROR', 'idempotent',
-                `ADD COLUMN ${col} without IF NOT EXISTS — the file is applied by hand and may be applied twice.`);
-        if (/\bnot\s+null\b/i.test(definition) && !/\bdefault\b/i.test(definition))
-            add(label, line, 'ERROR', 'additive',
-                `ADD COLUMN ${col} NOT NULL with no DEFAULT fails on any populated table. Add it nullable, backfill, then tighten in a later migration.`);
-        checkColumnRules(label, line, m[1].replace(/"/g, '').split('.').pop().toLowerCase(), col, definition);
-    }
-
-    const addConstraintRe = /alter\s+table\s+(?:only\s+)?([\w.".]+)\s+add\s+constraint\s+([\w"]+)\s+([\s\S]*?);/gi;
-    const addedConstraints = [];
-    while ((m = addConstraintRe.exec(sql)) !== null) {
-        addedConstraints.push({
-            table: m[1].replace(/"/g, '').split('.').pop().toLowerCase(),
-            name: m[2].replace(/"/g, '').toLowerCase(),
-            body: m[3].replace(/\s+/g, ' ').trim(),
-            line: lineOf(sql, m.index),
-        });
-        const isSafe = /^\s*do\s+\$\$/im.test(sql.slice(Math.max(0, m.index - 400), m.index));
-        if (!isSafe)
-            add(label, lineOf(sql, m.index), 'NOTE', 'idempotent',
-                `ADD CONSTRAINT ${m[2]} — PostgreSQL has no IF NOT EXISTS here. Guard it with a DO block testing pg_constraint, or applying twice errors.`);
-    }
-
-    // ---- per-table rules --------------------------------------------------
-
-    for (const { m: tm, index } of tableStarts) {
-        const line = lineOf(sql, index);
-        const rawTable = tm[2].split('.').pop();
-        const table = rawTable.replace(/"/g, '').toLowerCase();
-        const open = sql.indexOf('(', index + tm[0].length - 1);
-        const parsed = balanced(sql, open);
-        if (!parsed) continue;
-
-        if (!tm[1])
-            add(label, line, 'ERROR', 'idempotent',
-                `CREATE TABLE ${table} without IF NOT EXISTS — the file is applied by hand and may be applied twice.`);
-        if (!/\./.test(tm[2]))
-            add(label, line, 'NOTE', 'schema-qualified',
-                `${table} is not schema-qualified — all DDL in this schema is written as public.<table>.`);
-        if (/[A-Z]/.test(rawTable))
-            add(label, line, rawTable.startsWith('"') ? 'ERROR' : 'WARN', 'lowercase-names',
-                `Table ${rawTable} is written mixed-case — 0 of 111 table names are. ${rawTable.startsWith('"') ? 'Quoted, it stays mixed-case and every query must quote it.' : `Postgres folds it to \`${table}\`; write it that way.`}`);
-        if (table.includes('_'))
-            add(label, line, 'ERROR', 'no-underscores',
-                `Table "${table}" has an underscore — no table name in the schema does. Names are <domain><role>, unseparated.`);
-        if (/(s|es)$/.test(table) && !/(status|address|settings)$/.test(table))
-            add(label, line, 'NOTE', 'singular-names',
-                `Table "${table}" looks plural — only 3 of 111 are, all key-value or ledger-ish. Default to singular.`);
-
-        const columns = [];
-        const constraints = [];
-        for (const item of splitTop(parsed.body)) {
-            if (CONSTRAINT_START.test(item.text)) {
-                constraints.push(item.text.replace(/\s+/g, ' '));
-                continue;
+// Replace comments with spaces so character positions stay the same.
+function blankComments(sql) {
+    let out = '';
+    let i = 0;
+    let quote = null;
+    while (i < sql.length) {
+        const c = sql[i];
+        const n = sql[i + 1];
+        if (quote) {
+            out += c;
+            if (c === quote) quote = null;
+            i++;
+        } else if (c === "'") {
+            quote = c;
+            out += c;
+            i++;
+        } else if (c === '-' && n === '-') {
+            while (i < sql.length && sql[i] !== '\n') {
+                out += ' ';
+                i++;
             }
-            const cm = item.text.match(/^("?[\w$]+"?)\s+([\s\S]+)$/);
-            if (!cm) continue;
-            columns.push({
-                name: cm[1].replace(/"/g, '').toLowerCase(),
-                raw: cm[1],
-                line: lineOf(sql, open + 1 + item.offset),
-                definition: cm[2].replace(/\s+/g, ' ').trim(),
-            });
-        }
-        if (!columns.length) continue;
-
-        const names = new Set(columns.map((c) => c.name));
-        const tableConstraints = [
-            ...constraints,
-            ...addedConstraints.filter((c) => c.table === table).map((c) => `CONSTRAINT ${c.name} ${c.body}`),
-        ];
-        const constraintText = tableConstraints.join(' \n ').toLowerCase();
-
-        // primary key
-        const inlinePk = columns.find((c) => /\bprimary\s+key\b/i.test(c.definition));
-        const declaredPk = tableConstraints.find((c) => /primary\s+key/i.test(c));
-        const pkCols = inlinePk
-            ? [inlinePk.name]
-            : declaredPk
-              ? ((declaredPk.match(/primary\s+key\s*\(([^)]*)\)/i) || [, ''])[1]
-                    .split(',')
-                    .map((s) => s.trim().replace(/"/g, '').toLowerCase())
-                    .filter(Boolean))
-              : [];
-        if (!pkCols.length)
-            add(label, line, 'ERROR', 'id-pk',
-                `${table} has no primary key. All 111 tables have one, single-column, named id.`);
-        else if (pkCols.length > 1)
-            add(label, line, 'ERROR', 'id-pk',
-                `${table} has a composite primary key (${pkCols.join(', ')}). All 111 are single-column \`id\`; put the pair in a unique index instead.`);
-        else if (pkCols[0] !== 'id')
-            add(label, line, 'ERROR', 'id-pk',
-                `${table} has "${pkCols[0]}" as its primary key. All 111 tables use \`id\`, and the models assume it.`);
-
-        const idCol = columns.find((c) => c.name === 'id');
-        if (idCol) {
-            if (/generated[\s\S]*as\s+identity/i.test(idCol.definition))
-                add(label, line, 'ERROR', 'serial-pk',
-                    `${table}.id uses GENERATED AS IDENTITY — that is deviation D2 (2 tables). Use \`serial\` for a master or \`bigserial\` for anything transactional.`);
-            else if (!/\b(serial|bigserial)\b/i.test(idCol.definition))
-                add(label, line, 'WARN', 'serial-pk',
-                    `${table}.id is not serial/bigserial. 109 of 111 are — serial for masters, bigserial for documents, line items, ledgers and logs.`);
-        }
-
-        // audit block
-        //
-        // `raw` and `sql` share offsets (comments are blanked, not removed), so
-        // this reads the comment block immediately above the CREATE TABLE. The
-        // rule is "omit the update/delete columns only if the table is
-        // append-only AND says so" — a file that says so has met it.
-        const declaredAppendOnly = /append[- ]only/i.test(raw.slice(Math.max(0, index - 400), index));
-        const appendOnly = declaredAppendOnly || /log$/.test(table);
-        const missing = AUDIT.filter((c) => !names.has(c));
-        if (missing.length && !(declaredAppendOnly && !missing.includes('createdat') && !missing.includes('createdby'))) {
-            const level = appendOnly ? 'NOTE' : 'WARN';
-            add(label, line, level, 'audit-block',
-                `${table} is missing ${missing.join(', ')}. 107 of 111 tables carry all five verbatim.${appendOnly ? ' If it is strictly append-only, keep createdby+createdat only and say so in a comment above the table.' : ''}`);
-        }
-        const createdat = columns.find((c) => c.name === 'createdat');
-        if (createdat && !/default\s+now\(\)/i.test(createdat.definition))
-            add(label, line, 'WARN', 'audit-block',
-                `${table}.createdat is not \`timestamp DEFAULT now() NOT NULL\` — 111 of 111 are, with zero variance.`);
-        if (names.has('isdeleted')) {
-            const c = columns.find((x) => x.name === 'isdeleted');
-            if (!/smallint|int2/i.test(c.definition) || !/default\s+0/i.test(c.definition))
-                add(label, line, 'WARN', 'soft-delete',
-                    `${table}.isdeleted is not \`smallint DEFAULT 0 NOT NULL\` — 107 of 107 are, with zero variance.`);
-        }
-
-        // tenancy
-        const tenancyCol = columns.find((c) => c.name === 'organizationid');
-        if (!tenancyCol) {
-            add(label, line, 'NOTE', 'tenancy',
-                `${table} has no organizationid. That is right for a platform-level table and for nothing else — line items should carry it too (D5). Say which this is.`);
+        } else if (c === '/' && n === '*') {
+            while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) {
+                out += sql[i] === '\n' ? '\n' : ' ';
+                i++;
+            }
+            out += '  ';
+            i += 2;
         } else {
-            // Second in every table that has it — or third on a child table,
-            // where the parent id comes first after id.
-            const pos = columns.findIndex((c) => c.name === 'organizationid');
-            const childish = pos === 2 && /id$/.test(columns[1].name);
-            if (pos > 1 && !childish)
-                add(label, line, 'NOTE', 'tenancy',
-                    `${table}.organizationid is column ${pos + 1} — it sits immediately after id in every table that has it (after the parent id on a child table).`);
-            if (!/\bnot\s+null\b/i.test(tenancyCol.definition))
-                add(label, line, 'WARN', 'tenancy',
-                    `${table}.organizationid is nullable. Only two tables do that deliberately (organizationsettings, auditlogmaster) and both need complementary partial unique indexes to make it safe.`);
-            const hasFk =
-                /references/i.test(tenancyCol.definition) ||
-                /organizationid[\s\S]*references/.test(constraintText);
-            if (!hasFk)
-                add(label, line, 'ERROR', 'tenancy-fk',
-                    `${table}.organizationid has no FK to organizationmaster(id) — that is deviation D6 (5 tables), and nothing stops an orphan org id.`);
-            const hasOrgIndex = indexes.some(
-                (i) => i.table === table && /\(\s*organizationid/i.test(i.body)
-            );
-            if (!hasOrgIndex)
-                add(label, line, 'WARN', 'tenant-index',
-                    `No index leading with organizationid on ${table}. Every SELECT filters organizationid and isdeleted — without \`idx_${table}_org (organizationid, isdeleted)\` every list endpoint is a sequential scan.`);
+            out += c;
+            i++;
         }
-
-        /**
-         * A unique on a business VALUE must be org-scoped (D8). A unique on a set
-         * of FK columns need not be: the junction tables in the schema use a bare
-         * `UNIQUE (<a>id, <b>id)`, and that is already tenant-safe because both
-         * targets are themselves org-scoped.
-         */
-        const valueUnique = (cols) =>
-            cols.some((c) => {
-                const col = columns.find((x) => x.name === c);
-                return !col || !/id$/.test(c) || !/^(integer|bigint|smallint|int\d?)\b/.test(normaliseType(col.definition));
-            });
-
-        for (const c of tableConstraints) {
-            const um = c.match(/unique\s*\(([^)]*)\)/i);
-            if (!um) continue;
-            const cols = um[1].split(',').map((s) => s.trim().toLowerCase());
-            if (tenancyCol && !cols.includes('organizationid') && valueUnique(cols))
-                add(label, line, 'ERROR', 'org-scoped-unique',
-                    `UNIQUE (${cols.join(', ')}) on ${table} is not org-scoped — that is deviation D8, the one with real blast radius: two organizations cannot both use the same value, and the failure surfaces as a duplicate-key error in an unrelated tenant.`);
-        }
-        for (const idx of indexes.filter((i) => i.unique && i.table === table)) {
-            const cm = idx.body.match(/\(([^)]*)\)/);
-            const cols = cm ? cm[1].split(',').map((s) => s.trim().split(' ')[0].toLowerCase()) : [];
-            if (tenancyCol && cols.length && !cols.includes('organizationid') && valueUnique(cols))
-                add(label, idx.line, 'ERROR', 'org-scoped-unique',
-                    `Unique index ${idx.name} on ${table} is not org-scoped (D8) — two organizations cannot then use the same value. Lead with organizationid.`);
-            if (names.has('isdeleted') && !/where/i.test(idx.body))
-                add(label, idx.line, 'NOTE', 'partial-unique',
-                    `Unique index ${idx.name} has no \`WHERE isdeleted = 0\` — 56 of 109 indexes are partial. Without it, a soft-deleted row keeps blocking its code forever. That is correct for a document number and usually wrong for anything else.`);
-        }
-
-        // unnamed FKs
-        for (const c of tableConstraints)
-            if (/foreign\s+key/i.test(c) && !/^constraint\s+fk_/i.test(c.trim()))
-                add(label, line, 'WARN', 'named-fk',
-                    `Foreign key on ${table} is not hand-named \`fk_<table>_<target>\` — that is what the last twelve months of migrations do, and it makes DROP CONSTRAINT writable without a lookup.`);
-        for (const c of columns)
-            if (/\breferences\b/i.test(c.definition))
-                add(label, line, 'WARN', 'named-fk',
-                    `${table}.${c.name} uses an inline REFERENCES, which Postgres auto-names. Declare it as \`CONSTRAINT fk_${table}_<target> FOREIGN KEY …\`.`);
-
-        // column-level rules
-        for (const c of columns)
-            checkColumnRules(label, c.line, table, c.name, c.definition, constraintText, c.raw);
     }
-
-    if (!/WHAT THIS IS/i.test(raw) && tableStarts.length)
-        add(label, 1, 'NOTE', 'header-block',
-            'No header block. The house style opens with WHAT THIS IS / WHY / DECISIONS LOCKED / BEHAVIOUR-NEUTRAL ON ITS OWN — the last line tells whoever applies it whether they have just changed production behaviour.');
-    if (!/rollback/i.test(raw) && tableStarts.length)
-        add(label, 1, 'NOTE', 'rollback',
-            'No rollback section. Every migration ends with one, commented out, in reverse order of creation — or a line saying why a rollback would lose data.');
-};
-
-function checkColumnRules(label, line, table, name, definition, constraintText = '', raw = name) {
-    const where = `${table}.${name}`;
-    const typeMatch = definition.match(
-        /^([\s\S]*?)(?=\s+(?:not\s+null|null\b|default\b|primary\s+key|references\b|unique\b|check\b|generated\b|collate\b)|$)/i
-    );
-    const type = normaliseType(typeMatch ? typeMatch[1] : definition);
-    const base = baseType(type);
-
-    // An unquoted identifier folds to lowercase, so `noteNumber` is harmless in
-    // the catalog and misleading in the source; a quoted one is uppercase for
-    // real, and every query then has to quote it too.
-    if (/[A-Z]/.test(raw))
-        add(label, line, raw.startsWith('"') ? 'ERROR' : 'WARN', 'lowercase-names',
-            raw.startsWith('"')
-                ? `${table}."${raw.replace(/"/g, '')}" is a quoted mixed-case identifier — 0 of 2 061 columns are, and every query would have to quote it forever.`
-                : `${table}.${raw} is written mixed-case. Postgres folds it to \`${name}\`, so the JSON key the frontend gets is \`${name}\` — write it that way in the DDL too.`);
-    if (name.includes('_'))
-        add(label, line, 'ERROR', 'no-underscores',
-            `${where} has an underscore — only 1.2% of columns do, all inside two named legacy pockets (D1). New columns are unseparated: \`totaltaxamount\`, not \`total_tax_amount\`.`);
-
-    if (base === 'boolean' || base === 'bool')
-        add(label, line, 'ERROR', 'int2-flags',
-            `${where} is \`boolean\` — there is exactly 1 in 2 061 columns (D4). Use \`smallint\` holding 0/1: the frontend tests \`flag === 1\`, which returns false for a real boolean.`);
-    if (/default\s+(true|false)\b/i.test(definition))
-        add(label, line, 'ERROR', 'int2-flags',
-            `${where} defaults to true/false — flags default to 0 or 1.`);
-    if (/^(is|can|allow|auto|has)[a-z]/.test(name) && base && !['smallint', 'int2'].includes(base))
-        add(label, line, 'WARN', 'int2-flags',
-            `${where} looks like a flag but is \`${type}\`. 223 flag columns are \`int2\` 0/1, 210 of them NOT NULL.`);
-
-    if (base === 'timestamptz')
-        add(label, line, 'ERROR', 'no-timestamptz',
-            `${where} is \`timestamptz\` — 276 of 277 timestamp columns are without time zone (D3). Mixing them in a comparison silently applies the session TimeZone.`);
-    if (base === 'timestamp' && /^(.*date)$/.test(name) && !/at$/.test(name))
-        add(label, line, 'NOTE', 'date-vs-timestamp',
-            `${where} is a \`timestamp\` but reads like a business date. 65 business dates are \`date\`; \`timestamp\` is for \`*at\` event times.`);
-
-    if (base === 'varchar') {
-        const len = (type.match(/\((\d+)\)/) || [])[1];
-        if (!len)
-            add(label, line, 'ERROR', 'bounded-varchar',
-                `${where} is an unbounded \`varchar\` — there is exactly 1 in the schema (D7). Give it a length from the ladder: 20/30/50/100/150/200/255/500.`);
-        else if (!LADDER.has(len))
-            add(label, line, 'WARN', 'varchar-ladder',
-                `${where} is varchar(${len}), which is off the ladder (20 ×86, 100 ×81, 50 ×58, 30 ×47, 200 ×40, 150 ×27, 500 ×11, 255 ×10). A varchar(${len}) will look wrong to a reviewer.`);
-    }
-
-    if (base === 'numeric' && !type.includes('('))
-        add(label, line, 'WARN', 'numeric-precision',
-            `${where} is unconstrained \`numeric\`. Money is numeric(14,2), quantities and unit prices numeric(14,4), percentages numeric(5,2).`);
-    if (/(amount|total|price|cost|balance|paid)$/.test(name) && base === 'numeric') {
-        const p = (type.match(/\(([\d,]+)\)/) || [, ''])[1];
-        if (p && !['14,2', '14,4', '6,2', '5,2'].includes(p.replace(/\s/g, '')))
-            add(label, line, 'NOTE', 'numeric-precision',
-                `${where} is numeric(${p}) — money is numeric(14,2) in 134 columns, unit prices numeric(14,4).`);
-    }
-    if (/(percentage|percent|pct)$/.test(name) && base === 'numeric') {
-        const p = (type.match(/\(([\d,]+)\)/) || [, ''])[1];
-        if (p && p.replace(/\s/g, '') !== '5,2')
-            add(label, line, 'NOTE', 'numeric-precision',
-                `${where} is numeric(${p}) — percentages are numeric(5,2) in 33 of 35 cases.`);
-    }
-
-    if (base === 'jsonb' || base === 'json')
-        add(label, line, 'NOTE', 'prefer-columns',
-            `${where} is ${base} — there are exactly 2 such columns in 2 061. If the shape is unclear, that is a question for the user rather than a reason for a blob.`);
-
-    if (/status$/.test(name) && base === 'varchar' && constraintText && !constraintText.includes(name))
-        add(label, line, 'WARN', 'status-check',
-            `${where} has no CHECK constraint — that is deviation D9 (22 unguarded status columns). A typo'd status writes cleanly and then never matches a filter. Add \`chk_<abbrev>_${name}\` with the \`= ANY (ARRAY[…])\` form.`);
-
-    const stateLiterals = [...definition.matchAll(/'([A-Za-z_][\w ]*)'/g)].map((x) => x[1]);
-    for (const lit of stateLiterals)
-        if (/[A-Z]/.test(lit) && !['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'FIFO', 'LIFO', 'AVCO', 'STANDARD', 'LMV', 'HMV', 'HGMV', 'MCWG', 'Other'].includes(lit))
-            add(label, line, 'NOTE', 'snake-case-states',
-                `${where} default '${lit}' is not lower_snake_case. State tokens are lowercase (\`tax_invoice\`, \`partially_received\`); the three uppercase exceptions are all external industry codes.`);
-
-    if (/^(created|updated|deleted|modified)_?(at|by)$/.test(name) && name.includes('_'))
-        add(label, line, 'ERROR', 'audit-block',
-            `${where} — the audit columns are \`createdby\`, \`createdat\`, \`updatedby\`, \`updatedat\`, \`isdeleted\`. No underscores.`);
+    return out;
 }
 
-const main = () => {
-    const args = parseArgs(process.argv.slice(2));
-    let files = args.files;
-    if (args.dir)
-        files = files.concat(
-            fs
-                .readdirSync(args.dir)
-                .filter((f) => f.endsWith('.sql'))
-                .sort()
-                .map((f) => path.join(args.dir, f))
+const unquote = (name) => {
+    const last = name.trim().split('.').pop();
+    return last.replace(/^[`"[]|[`"\]]$/g, '');
+};
+
+function splitTopLevel(body) {
+    const parts = [];
+    let depth = 0;
+    let cur = '';
+    let quote = null;
+    for (const c of body) {
+        if (quote) {
+            cur += c;
+            if (c === quote) quote = null;
+            continue;
+        }
+        if (c === "'") {
+            quote = c;
+            cur += c;
+            continue;
+        }
+        if (c === '(') depth++;
+        if (c === ')') depth--;
+        if (c === ',' && depth === 0) {
+            parts.push(cur.trim());
+            cur = '';
+            continue;
+        }
+        cur += c;
+    }
+    if (cur.trim()) parts.push(cur.trim());
+    return parts;
+}
+
+function matchParen(text, openIdx) {
+    let depth = 0;
+    let quote = null;
+    for (let i = openIdx; i < text.length; i++) {
+        const c = text[i];
+        if (quote) {
+            if (c === quote) quote = null;
+            continue;
+        }
+        if (c === "'") {
+            quote = c;
+            continue;
+        }
+        if (c === '(') depth++;
+        if (c === ')') {
+            depth--;
+            if (depth === 0) return i;
+        }
+    }
+    return -1;
+}
+
+function detectDialect(sql) {
+    if (/`|AUTO_INCREMENT|ENGINE\s*=/i.test(sql)) return 'mysql';
+    if (/IDENTITY\s*\(|NVARCHAR|\bGO\b|OBJECT_ID\s*\(|SYSDATETIME/i.test(sql)) return 'mssql';
+    if (/AUTOINCREMENT|PRAGMA/i.test(sql)) return 'sqlite';
+    return 'postgres';
+}
+
+const CONSTRAINT_START =
+    /^(CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|KEY|INDEX|EXCLUDE)\b/i;
+
+// ------------------------------------------------------------ column checks
+
+function checkColumn(table, name, def, dialect) {
+    const where = `${table}.${name}`;
+    const d = def.toLowerCase();
+    if (!NAME_RE.test(name))
+        err('R1', where, 'column name must be lowercase letters/digits, no separators');
+
+    if (/\b(boolean|bool)\b/.test(d) || /^\s*bit\b/.test(d) || /tinyint\s*\(\s*1\s*\)/.test(d)) {
+        err('R13', where, 'booleans are smallint 0/1, not a boolean/bit/tinyint(1) type');
+    }
+    if (/timestamptz|with\s+time\s+zone/.test(d))
+        err('R17', where, 'timestamps are without time zone');
+    if (dialect === 'mysql' && /^\s*timestamp\b/.test(d))
+        err('R17', where, 'MySQL: use datetime, not the TIMESTAMP type (it converts time zones)');
+    if (/\benum\s*\(/.test(d)) err('R15', where, 'no ENUM types: varchar + CHECK');
+    if (/on\s+update\s+current_timestamp/.test(d))
+        err('R12', where, 'no ON UPDATE CURRENT_TIMESTAMP: the app sets updatedat');
+    if (/\b(n?varchar|character\s+varying)\b(?!\s*\()/.test(d))
+        err('R18', where, 'varchar must have a length from the ladder');
+    const len = d.match(/\b(?:n?varchar|character\s+varying)\s*\(\s*(\d+)\s*\)/);
+    if (len && !LADDER.includes(Number(len[1])))
+        warn('R18', where, `varchar(${len[1]}) is not on the ladder ${LADDER.join('/')}`);
+    if (/\bjsonb?\b/.test(d))
+        warn('R19', where, 'JSON column: ask for the fields and make them real columns');
+
+    const isSmallint = /^\s*(smallint|int2)\b/.test(d);
+    if (BOOL_NAME_RE.test(name) && !isSmallint)
+        err('R13', where, `"${name}" reads as a flag, so it must be smallint 0/1`);
+    if (name === 'isactive' && !(isSmallint && /default\s+1\b/.test(d) && /not\s+null/.test(d))) {
+        err('R14', where, 'isactive must be smallint DEFAULT 1 NOT NULL');
+    }
+    if (name === 'status' && !/^\s*(n?varchar|character\s+varying)\s*\(\s*(20|30)\s*\)/.test(d)) {
+        warn('R15', where, 'status is usually varchar(20) or varchar(30)');
+    }
+}
+
+function checkAuditColumn(table, name, def) {
+    const where = `${table}.${name}`;
+    const d = def.toLowerCase();
+    const notNull = /not\s+null/.test(d);
+    if (name === 'createdby' || name === 'updatedby') {
+        if (!/^\s*(integer|int|int4)\b/.test(d) || !/default\s+1\b/.test(d) || !notNull)
+            err('R7', where, 'must be integer DEFAULT 1 NOT NULL');
+    } else if (name === 'createdat' || name === 'updatedat') {
+        const typeOk = /^\s*(timestamp|datetime2?)\b/.test(d) && !/time\s+zone|timestamptz/.test(d);
+        const defOk = /default\s+(now\(\)|current_timestamp|sysdatetime\(\)|getdate\(\))/.test(d);
+        if (!typeOk || !defOk || !notNull)
+            err('R7', where, 'must be timestamp DEFAULT now() NOT NULL (dialect spelling allowed)');
+    } else if (name === 'isdeleted') {
+        if (!/^\s*(smallint|int2)\b/.test(d) || !/default\s+0\b/.test(d) || !notNull)
+            err('R7', where, 'must be smallint DEFAULT 0 NOT NULL');
+    }
+}
+
+function checkForeignKey(table, col, target, targetCol, tail) {
+    const where = `${table}.${col}`;
+    const t = unquote(target);
+    const tc = unquote(targetCol);
+    if (tc !== expectedPk(t) && t !== 'sequencemaster')
+        err(
+            'R6',
+            where,
+            `must reference ${t}(${expectedPk(t)}), the target's primary key, not ${t}(${tc})`
         );
-    if (!files.length) {
-        console.error('usage: verify-ddl.js <file.sql> [more.sql ...] | --dir <migrations-dir>');
+    const pk = expectedPk(t);
+    const nameOk = col === pk || col.endsWith(pk) || (t === 'usermaster' && /by$/.test(col));
+    if (!nameOk)
+        err(
+            'R5',
+            where,
+            `a link to ${t} should be named ${pk} (or <qualifier>${pk}${t === 'usermaster' ? ', or <verb>by' : ''})`
+        );
+    if (/on\s+(delete|update)\s+(cascade|set\s+null|set\s+default)/i.test(tail))
+        err('R11', where, 'no cascades: remove ON DELETE/ON UPDATE action');
+}
+
+// ------------------------------------------------------------- SQL: tables
+
+function checkTable(raw, clean, start, tableName, body, dialect, wholeClean) {
+    const table = unquote(tableName);
+    if (!NAME_RE.test(table))
+        err('R1', table, 'table name must be lowercase letters/digits, no separators');
+
+    // append-only: name ends in "log", or an "append-only" comment on the lines directly above
+    const above = raw.slice(0, start).split('\n');
+    above.pop(); // the part of the CREATE line before "CREATE"
+    const comment = [];
+    while (above.length && /^\s*--/.test(above[above.length - 1])) comment.push(above.pop());
+    const appendOnly = /log$/.test(table) || /append-only/i.test(comment.join('\n'));
+
+    const items = splitTopLevel(body);
+    const columns = [];
+    const constraints = [];
+    for (const item of items) {
+        if (CONSTRAINT_START.test(item)) constraints.push(item);
+        else {
+            const m = item.match(/^([`"[]?[A-Za-z0-9_]+[`"\]]?)\s+([\s\S]*)$/);
+            if (m) columns.push({ name: unquote(m[1]), def: m[2] });
+        }
+    }
+    const names = columns.map((c) => c.name);
+
+    // R3 primary key
+    const pkCols = columns.filter((c) => /primary\s+key/i.test(c.def)).map((c) => c.name);
+    for (const c of constraints) {
+        const m = c.match(/primary\s+key\s*\(([^)]*)\)/i);
+        if (m) pkCols.push(...m[1].split(',').map(unquote));
+    }
+    const pk = expectedPk(table);
+    if (pkCols.length === 0) err('R3', table, `no primary key; expected ${pk}`);
+    else if (pkCols.length > 1)
+        err(
+            'R3',
+            table,
+            `composite primary key (${pkCols.join(', ')}); expected single column ${pk}`
+        );
+    else if (pkCols[0] !== pk) err('R3', table, `primary key is "${pkCols[0]}"; expected "${pk}"`);
+
+    // R7 / R8 audit block
+    const want = appendOnly ? APPEND_ONLY_AUDIT : AUDIT;
+    const tail = names.slice(-want.length);
+    if (tail.join(',') !== want.join(',')) {
+        err(
+            appendOnly ? 'R8' : 'R7',
+            table,
+            `last columns must be ${want.join(', ')}${appendOnly ? ' (append-only table)' : ''}; found ${tail.join(', ') || 'none'}`
+        );
+    }
+    if (appendOnly) {
+        for (const extra of ['updatedby', 'updatedat', 'isdeleted']) {
+            if (names.includes(extra))
+                err(
+                    'R8',
+                    table,
+                    `append-only table must not have ${extra} (or drop the append-only marking)`
+                );
+        }
+    }
+    for (const c of columns) {
+        if (AUDIT.includes(c.name)) checkAuditColumn(table, c.name, c.def);
+        else checkColumn(table, c.name, c.def, dialect);
+    }
+
+    // R14 isactive needs isdeleted
+    if (names.includes('isactive') && !names.includes('isdeleted'))
+        err('R14', table, 'a table with isactive must also have isdeleted');
+
+    // CHECK coverage: status (R15) and flags (R13)
+    const tableChecks =
+        constraints.filter((c) => /\bcheck\s*\(/i.test(c)).join('\n') +
+        columns
+            .filter((c) => /\bcheck\s*\(/i.test(c.def))
+            .map((c) => `${c.name} ${c.def}`)
+            .join('\n');
+    const alterChecks = [
+        ...wholeClean.matchAll(
+            new RegExp(`ALTER\\s+TABLE\\s+[^;]*\\b${table}\\b[^;]*CHECK\\s*\\(([^;]*)`, 'gi')
+        ),
+    ]
+        .map((m) => m[1])
+        .join('\n');
+    const allChecks = (tableChecks + '\n' + alterChecks).toLowerCase();
+    if (names.includes('status') && !/\bstatus\b/.test(allChecks))
+        err(
+            'R15',
+            `${table}.status`,
+            'every status column needs a CHECK listing its allowed values'
+        );
+    for (const n of names) {
+        if (
+            BOOL_NAME_RE.test(n) &&
+            !new RegExp(`\\b${n}\\b[^,]*in\\s*\\(\\s*0\\s*,\\s*1\\s*\\)`).test(allChecks)
+        ) {
+            warn('R13', `${table}.${n}`, 'add CHECK (... IN (0, 1))');
+        }
+    }
+
+    // foreign keys: inline and table-level
+    for (const c of columns) {
+        const m = c.def.match(/references\s+([^\s(]+)\s*\(\s*([^)\s]+)\s*\)([\s\S]*)/i);
+        if (m) {
+            checkForeignKey(table, c.name, m[1], m[2], m[3]);
+            warn(
+                'R21',
+                `${table}.${c.name}`,
+                `name the foreign key: CONSTRAINT fk_${table}_${unquote(m[1]).replace(/master$/, '')} FOREIGN KEY ...`
+            );
+        }
+    }
+    for (const c of constraints) {
+        const m = c.match(
+            /foreign\s+key\s*\(\s*([^)]+)\)\s*references\s+([^\s(]+)\s*\(\s*([^)\s]+)\s*\)([\s\S]*)/i
+        );
+        if (m) checkForeignKey(table, unquote(m[1]), m[2], m[3], m[4]);
+        const named = c.match(
+            /^constraint\s+([^\s]+)\s+(primary\s+key|foreign\s+key|unique|check|exclude)/i
+        );
+        if (named) {
+            const [, cname, kind] = named;
+            const prefix = { 'foreign key': 'fk_', unique: 'uq_', check: 'chk_' }[
+                kind.toLowerCase().replace(/\s+/, ' ')
+            ];
+            if (prefix && !unquote(cname).startsWith(prefix))
+                warn('R21', table, `constraint ${cname} should start with ${prefix}`);
+        } else if (/^(foreign\s+key|check|unique)/i.test(c)) {
+            warn('R21', table, `name this constraint by hand: ${c.slice(0, 60)}`);
+        }
+    }
+    return { table, names };
+}
+
+function verifySql(file, dialectArg) {
+    const raw = fs.readFileSync(file, 'utf8');
+    const clean = blankComments(raw);
+    const dialect = dialectArg || detectDialect(clean);
+    const tables = {};
+
+    const re = /CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?([^\s(]+)\s*\(/gi;
+    let m;
+    while ((m = re.exec(clean))) {
+        const open = m.index + m[0].length - 1;
+        const close = matchParen(clean, open);
+        if (close < 0) {
+            err('PARSE', unquote(m[2]), 'unbalanced parentheses');
+            continue;
+        }
+        if (!m[1] && dialect !== 'mssql')
+            warn(
+                'R23',
+                unquote(m[2]),
+                'use CREATE TABLE IF NOT EXISTS so the migration can be re-run'
+            );
+        const info = checkTable(
+            raw,
+            clean,
+            m.index,
+            m[2],
+            clean.slice(open + 1, close),
+            dialect,
+            clean
+        );
+        tables[info.table] = info.names;
+        re.lastIndex = close;
+    }
+
+    // ALTER TABLE ... ADD [COLUMN] [IF NOT EXISTS] name def
+    const addRe =
+        /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([^\s]+)\s+ADD\s+(COLUMN\s+)?(IF\s+NOT\s+EXISTS\s+)?(?!CONSTRAINT\b)([`"[]?[A-Za-z0-9_]+[`"\]]?)\s+([^;]*)/gi;
+    while ((m = addRe.exec(clean))) {
+        const table = unquote(m[1]);
+        const name = unquote(m[4]);
+        if (/^(primary|foreign|unique|check|index|key)$/i.test(name)) continue;
+        checkColumn(table, name, m[5], dialect);
+        if (!m[3] && dialect === 'postgres')
+            warn('R23', `${table}.${name}`, 'use ADD COLUMN IF NOT EXISTS');
+        if (/not\s+null/i.test(m[5]) && !/default/i.test(m[5]))
+            warn(
+                'R24',
+                `${table}.${name}`,
+                'NOT NULL without DEFAULT fails on a table that already has rows'
+            );
+    }
+
+    // file-level rules
+    if (/CREATE\s+(OR\s+REPLACE\s+)?(CONSTRAINT\s+)?TRIGGER\b/i.test(clean))
+        err('R12', path.basename(file), 'no triggers: the app maintains every value');
+    if (/CREATE\s+TYPE\s+[^;]*\bAS\s+ENUM\b/i.test(clean))
+        err('R15', path.basename(file), 'no ENUM types: varchar + CHECK');
+    if (/\bDELETE\s+FROM\b/i.test(clean))
+        err('R10', path.basename(file), 'no DELETE: soft delete with UPDATE ... SET isdeleted = 1');
+    if (/\bTRUNCATE\b/i.test(clean))
+        err('R10', path.basename(file), 'no TRUNCATE: soft delete only');
+
+    const idxRe =
+        /CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?(IF\s+NOT\s+EXISTS\s+)?([^\s]+)\s+ON\s+([^\s(]+)([^;]*)/gi;
+    while ((m = idxRe.exec(clean))) {
+        const [, unique, , ifne, iname, itable, rest] = m;
+        const name = unquote(iname);
+        const table = unquote(itable);
+        const want = unique ? 'uq_' : 'idx_';
+        if (!name.startsWith(want))
+            warn('R21', name, `${unique ? 'unique ' : ''}index name should start with ${want}`);
+        if (!ifne && (dialect === 'postgres' || dialect === 'sqlite'))
+            warn('R23', name, 'use CREATE INDEX IF NOT EXISTS');
+        const hasDeleted = (tables[table] || []).includes('isdeleted');
+        const liveOnly = /isdeleted\s*=\s*0/i.test(rest);
+        if (unique && hasDeleted && !liveOnly) {
+            warn(
+                'R20',
+                name,
+                'unique index includes deleted rows; add WHERE isdeleted = 0 (MySQL: CASE WHEN isdeleted = 0 ...) unless numbers must never be reused'
+            );
+        }
+    }
+
+    if (!/rollback/i.test(raw))
+        warn('R23', path.basename(file), 'add a commented ROLLBACK section at the end');
+    if (!Object.keys(tables).length && !/ALTER\s+TABLE/i.test(clean))
+        warn('PARSE', path.basename(file), 'no CREATE TABLE or ALTER TABLE found');
+    return { dialect, count: Object.keys(tables).length };
+}
+
+// ---------------------------------------------------------------- MongoDB spec
+
+function verifyMongo(file) {
+    const spec = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const coll = spec.collection;
+    const fields = spec.fields || {};
+    const names = Object.keys(fields);
+    const indexes = spec.indexes || [];
+    if (!coll || !NAME_RE.test(coll))
+        err('R1', String(coll), 'collection name must be lowercase letters/digits, no separators');
+
+    for (const n of names)
+        if (n !== '_id' && !NAME_RE.test(n))
+            err('R1', `${coll}.${n}`, 'field name must be lowercase letters/digits, no separators');
+
+    // R3 key
+    const pk = expectedPk(coll || '');
+    if (coll === 'sequencemaster') {
+        if (spec.primarykey !== 'sequencename')
+            err('R3', coll, 'sequencemaster is keyed by sequencename');
+    } else if (spec.primarykey !== pk) {
+        err('R3', coll, `primarykey is "${spec.primarykey}"; expected "${pk}"`);
+    }
+    const pkField = fields[spec.primarykey];
+    if (!pkField) err('R3', coll, `primary key field "${spec.primarykey}" is not in fields`);
+    else if (
+        coll !== 'sequencemaster' &&
+        (!['int', 'long'].includes(pkField.type) || !pkField.required)
+    ) {
+        err('R3', `${coll}.${spec.primarykey}`, 'house key must be a required int or long');
+    }
+    const uniqueOn = (f) =>
+        indexes.some(
+            (ix) =>
+                ix.unique &&
+                Object.keys(ix.keys || {}).length === 1 &&
+                Object.keys(ix.keys)[0] === f
+        );
+    if (pkField && !uniqueOn(spec.primarykey))
+        err('R3', coll, `add a unique index on ${spec.primarykey}`);
+
+    // R7 / R8
+    const appendOnly = spec.appendonly === true || /log$/.test(coll || '');
+    const want = appendOnly ? APPEND_ONLY_AUDIT : AUDIT;
+    const tail = names.slice(-want.length);
+    if (tail.join(',') !== want.join(','))
+        err(
+            appendOnly ? 'R8' : 'R7',
+            coll,
+            `last fields must be ${want.join(', ')}; found ${tail.join(', ')}`
+        );
+    if (appendOnly)
+        for (const x of ['updatedby', 'updatedat', 'isdeleted'])
+            if (fields[x]) err('R8', coll, `append-only collection must not have ${x}`);
+    const audit = {
+        createdby: { type: 'int', default: 1 },
+        updatedby: { type: 'int', default: 1 },
+        createdat: { type: 'date', default: 'now' },
+        updatedat: { type: 'date', default: 'now' },
+        isdeleted: { type: 'int', default: 0 },
+    };
+    for (const [n, a] of Object.entries(audit)) {
+        const f = fields[n];
+        if (!f) continue;
+        if (f.type !== a.type || f.default !== a.default || !f.required)
+            err('R7', `${coll}.${n}`, `must be ${a.type}, default ${a.default}, required`);
+    }
+    if (fields.isdeleted && JSON.stringify(fields.isdeleted.enum) !== '[0,1]')
+        err('R13', `${coll}.isdeleted`, 'enum must be [0, 1]');
+
+    for (const [n, f] of Object.entries(fields)) {
+        const where = `${coll}.${n}`;
+        if (!['int', 'long', 'decimal', 'string', 'date', 'array', 'object'].includes(f.type))
+            err(
+                'TYPE',
+                where,
+                `unknown or forbidden type "${f.type}"${f.type === 'bool' ? ' (R13: booleans are int 0/1)' : ''}`
+            );
+        if (f.type === 'object')
+            warn('R19', where, 'free-form object: ask for the fields and make them real fields');
+        if (f.type === 'double') err('R18', where, 'money/decimals are decimal, never double');
+        if (BOOL_NAME_RE.test(n)) {
+            if (
+                f.type !== 'int' ||
+                JSON.stringify(f.enum) !== '[0,1]' ||
+                f.default === undefined ||
+                !f.required
+            ) {
+                err('R13', where, 'flag must be int, enum [0, 1], with a default, required');
+            }
+        }
+        if (n === 'isactive' && f.default !== 1) err('R14', where, 'isactive defaults to 1');
+        if (n === 'status' && (f.type !== 'string' || !Array.isArray(f.enum)))
+            err('R15', where, 'status must be a string with an enum of allowed values');
+        if (f.type === 'string' && !f.enum && !f.pattern && f.maxlength === undefined)
+            warn(
+                'R18',
+                where,
+                'give strings a maxlength from the ladder (omit only for long text)'
+            );
+        if (f.maxlength !== undefined && !LADDER.includes(f.maxlength))
+            warn('R18', where, `maxlength ${f.maxlength} is not on the ladder ${LADDER.join('/')}`);
+        if (/date$/.test(n) && f.type === 'date')
+            warn(
+                'R17',
+                where,
+                'business dates are string YYYY-MM-DD; use type date only for event times (*at)'
+            );
+        if (f.ref) {
+            const rpk = expectedPk(f.ref);
+            const ok = n === rpk || n.endsWith(rpk) || (f.ref === 'usermaster' && /by$/.test(n));
+            if (!ok)
+                err(
+                    'R5',
+                    where,
+                    `a link to ${f.ref} should be named ${rpk} (or <qualifier>${rpk})`
+                );
+            if (!indexes.some((ix) => Object.keys(ix.keys || {})[0] === n))
+                warn('R21', where, 'index every link field');
+        }
+    }
+    if (fields.isactive && !fields.isdeleted)
+        err('R14', coll, 'a collection with isactive must also have isdeleted');
+
+    for (const ix of indexes) {
+        const want2 = ix.unique ? 'uq_' : 'idx_';
+        if (!ix.name || !ix.name.startsWith(want2))
+            warn('R21', String(ix.name), `index name should start with ${want2}`);
+        const key0 = Object.keys(ix.keys || {})[0];
+        if (
+            ix.unique &&
+            key0 !== spec.primarykey &&
+            fields.isdeleted &&
+            !(ix.partialFilterExpression && ix.partialFilterExpression.isdeleted === 0)
+        ) {
+            warn(
+                'R20',
+                String(ix.name),
+                'unique index includes deleted rows; add partialFilterExpression { isdeleted: 0 }'
+            );
+        }
+    }
+    return { dialect: 'mongodb', count: 1 };
+}
+
+// ------------------------------------------------------------------- main
+
+function main() {
+    const args = process.argv.slice(2);
+    const file = args.find((a) => !a.startsWith('--') && args[args.indexOf(a) - 1] !== '--dialect');
+    const di = args.indexOf('--dialect');
+    const dialect = di >= 0 ? args[di + 1] : null;
+    if (!file) {
+        console.error(
+            'usage: node verify-ddl.js <file.sql | file.collection.json> [--dialect postgres|mysql|mssql|sqlite]'
+        );
         process.exit(2);
     }
-
-    for (const f of files) {
-        if (!fs.existsSync(f)) {
-            console.error(`Not found: ${f}`);
-            process.exit(2);
-        }
-        checkFile(f);
-    }
-
-    const order = { ERROR: 0, WARN: 1, NOTE: 2 };
-    findings.sort((a, b) => order[a.level] - order[b.level] || a.file.localeCompare(b.file) || a.line - b.line);
-
-    const counts = { ERROR: 0, WARN: 0, NOTE: 0 };
-    let currentLevel = null;
-    for (const f of findings) {
-        counts[f.level]++;
-        if (f.level !== currentLevel) {
-            const heading =
-                f.level === 'ERROR'
-                    ? '\nERRORS — these break a rule that holds everywhere'
-                    : f.level === 'WARN'
-                      ? '\nWARNINGS — a strong default, deviate only with a stated reason'
-                      : '\nNOTES — worth a look, often fine';
-            console.log(heading);
-            console.log('─'.repeat(heading.trim().length));
-            currentLevel = f.level;
-        }
-        console.log(`  ${f.file}:${f.line}  [${f.rule}]`);
-        console.log(`    ${f.message}`);
-    }
-
+    const result = file.endsWith('.json') ? verifyMongo(file) : verifySql(file, dialect);
+    const errors = findings.filter((f) => f.level === 'ERROR');
+    const warns = findings.filter((f) => f.level === 'WARN');
+    for (const f of [...errors, ...warns])
+        console.log(`${f.level.padEnd(5)} ${f.rule.padEnd(5)} ${f.where}: ${f.msg}`);
     console.log(
-        `\n${files.length} file(s): ${counts.ERROR} error(s), ${counts.WARN} warning(s), ${counts.NOTE} note(s).`
+        `\n${path.basename(file)} (${result.dialect}, ${result.count} table(s)): ${errors.length} error(s), ${warns.length} warning(s)`
     );
-    if (!findings.length) console.log('Clean — matches the house conventions.\n');
-    else
-        console.log(
-            'Every rule and its adherence count is in references/conventions.md.\n' +
-                'A finding you can justify out loud is fine; one you cannot is a bug.\n'
-        );
-
-    process.exit(counts.ERROR > 0 ? 1 : 0);
-};
+    process.exit(errors.length ? 1 : 0);
+}
 
 main();

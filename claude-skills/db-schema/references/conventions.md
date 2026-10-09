@@ -1,115 +1,100 @@
-# House DDL conventions
+# House conventions (R1 to R24)
 
-Every rule carries the count it was measured from, across 111 tables and 2 061
-columns. Where a rule has exceptions, they are named — an exception you can name
-is a decision; one you cannot is a bug. Full evidence: `dms-audit.md`.
+These are the user's rules. They apply to every database. Spellings per database are
+in `engines.md`; this file says WHAT, engines.md says HOW.
 
-Rules are graded:
+"Table" also means a MongoDB collection, and "column" also means a document field.
 
-- **[A]** invariant — 100%, or a single named one-off. Breaking one is a bug.
-- **[B]** strong default — ≥95%, with a coherent reason for each exception.
-- **[C]** convention — the dominant choice; deviate only with a stated reason.
+Rules marked **[must]** are checked by `scripts/verify-ddl.js` as errors.
+Rules marked **[default]** are followed unless the user says otherwise; verify warns.
 
 ---
 
-## 1. Identifiers and naming
+## Names
 
-### [A] Lowercase, no separators
+### R1 [must] All lowercase, no separators
 
-**0 of 2 061 columns contain an uppercase letter.** Same for all 111 table names.
-Only 25 columns (1.2%) contain an underscore, and all of them are in two named
-legacy pockets (§6, D1).
+Table, collection, column and field names use only `a-z` and `0-9`, starting with a letter.
+No uppercase, no `_`, no `-`, no camelCase.
 
-`productname`, `organizationid`, `createdat`, `totaltaxamount`,
-`reconciliationstatus`, `maximumretailprice`.
+| Right                                    | Wrong                                                    |
+| ---------------------------------------- | -------------------------------------------------------- |
+| `usermaster`, `createdat`, `totalamount` | `UserMaster`, `user_master`, `createdAt`, `total_amount` |
 
-There is **no ORM and no naming-translation layer.** The column name in SQL is
-the exact key the frontend receives. A column name is public API — renaming one
-breaks clients.
+The column name is the key the API and frontend receive, so a rename is a breaking change.
+Index and constraint names are not column names: they use the prefixes in R21 and may use `_`.
 
-### [C] Table names are `<domain><role>`, singular
+### R2 [default] Table names are singular and end by role
 
-| Suffix       | Count | Meaning                                                           |
-| ------------ | ----- | ----------------------------------------------------------------- |
-| `*master`    | 66    | Any first-class entity — **including documents**                   |
-| `*lineitem`  | 12    | Child rows of a document                                           |
-| `*map`       | 8     | Junction / many-to-many                                            |
-| `*log`       | 3     | Append-only                                                        |
-| `*history`   | 3     | Point-in-time snapshots                                            |
-| other        | 19    | `partyledger`, `productserial`, `batchwarehousestock`, …           |
+| Suffix     | Use for                                                                     |
+| ---------- | --------------------------------------------------------------------------- |
+| `master`   | any first-class entity, including documents (`usermaster`, `invoicemaster`) |
+| `lineitem` | child rows of a document (`invoicelineitem`)                                |
+| `map`      | many-to-many link (`rolepermissionmap`)                                     |
+| `log`      | append-only records (`loginlog`)                                            |
+| `history`  | point-in-time snapshots (`pricehistory`)                                    |
 
-`*master` does **not** mean "lookup table" here — `invoicemaster`, `grnmaster`
-and `paymentmaster` are documents. Pick the suffix by role, not by size.
-
-Only 3 names are plural (`usersettings`, `organizationsettings`,
-`subscriptionpayments`), all key-value or ledger-ish. **Default to singular.**
-
-### [B] FK columns are `<referenced-entity>id`
-
-`270/304` FK columns end in `id`; `223/304` are literally the target table minus
-its `master` suffix, plus `id`: `productid → productmaster`,
-`customerid → customermaster`, `warehouseid → warehousemaster`.
-
-Two FKs to the same target qualify the **prefix**, never invent a suffix:
-`baseunitid` / `salesunitid` / `purchaseunitid` → `unitmaster`;
-`parentcategoryid` → `categorymaster`; `billing*` / `shipping*`.
-
-### [A] Pointers to a user are `<verb>by`, not `<verb>userid`
-
-All 34 FK columns that do not end in `id` are role-qualified pointers to
-`usermaster`, and that is itself the convention:
-
-> `createdby`, `updatedby`, `invitedby`, `acceptedby`, `approvedby`,
-> `rejectedby`, `cancelledby`, `postedby`, `paidby`, `voidedby`, `countedby`,
-> `verifiedby`, `qualitycheckedby`, `collectedby`, `issuedby`, `deliveredby`,
-> `refundedby`
-
-### [B] Object name prefixes
-
-| Prefix           | Used for                     | Count                             |
-| ---------------- | ---------------------------- | --------------------------------- |
-| `<table>_pkey`   | primary keys                 | 111/111 — always the Postgres default |
-| `idx_*`          | non-unique lookup indexes    | 65                                |
-| `uq_*` / `ux_*`  | unique indexes / constraints | 29                                |
-| `chk_*`          | CHECK constraints            | 41 of 43                          |
-| `fk_*`           | hand-named FKs               | 29 (the other 272 are auto-named) |
-
-**For new work, hand-name FKs `fk_<table>_<target>`.** It is what the last twelve
-months of migrations do, and it makes `DROP CONSTRAINT` writable without a
-lookup. CHECK names are abbreviated, not the full table name:
-`chk_inv_discounttype`, `chk_so_ordersource`, `chk_spa_amount_positive`.
+Default to singular. `master` does not mean "small lookup table"; pick the suffix by role.
 
 ---
 
-## 2. Structural invariants
+## Keys
 
-### [A] `id` is the sole primary key — 111/111
+### R3 [must] Primary key is `<entity>id`
 
-Named `<tablename>_pkey` in 111/111 cases. Never hand-named, never composite,
-never on a business key.
+Entity = the table name with a trailing `master` removed. Nothing else is removed.
 
-| Type                              | Count | Use for                                             |
-| --------------------------------- | ----- | --------------------------------------------------- |
-| `serial` (int4)                   | 57    | masters, reference data                             |
-| `bigserial` (int8)                | 52    | anything transactional                              |
-| `GENERATED BY DEFAULT AS IDENTITY`| 2     | deviation D2 — do not copy                          |
+| Table               | Primary key           |
+| ------------------- | --------------------- |
+| `usermaster`        | `userid`              |
+| `productmaster`     | `productid`           |
+| `invoicelineitem`   | `invoicelineitemid`   |
+| `rolepermissionmap` | `rolepermissionmapid` |
+| `loginlog`          | `loginlogid`          |
 
-The split is semantic and consistent: every `*lineitem`, every document master
-(`invoicemaster`, `grnmaster`, `salesordermaster`, `purchaseordermaster`,
-`paymentmaster`), every log and every inventory table is `bigserial`.
+Single column, never composite, never a business code. Never a bare `id`.
+MongoDB keeps its required `_id` and adds this key as its own unique field (engines.md).
 
-**When unsure, ask: will this table hold one row per business event?** Yes →
-`bigserial`. Only-one-per-configured-thing → `serial`.
+### R4 [default] Key type by role
 
-### [A] `createdat` is universal and identically defined — 111/111
+- Small auto-increment integer for masters and reference data.
+- Big auto-increment integer for anything that gets one row per business event:
+  documents, line items, logs.
+  Ask: "will this table get a new row every time something happens?" Yes -> big.
+
+### R5 [must] A foreign key has the same name as the key it points to
+
+A column pointing at `usermaster` is `userid`; at `productmaster`, `productid`.
+
+Example: a map linking users to roles.
 
 ```sql
-createdat timestamp DEFAULT now() NOT NULL
+CREATE TABLE IF NOT EXISTS userrolemap (
+    userrolemapid  serial   PRIMARY KEY,   -- its own key: "map" is kept, only "master" is dropped
+    userid         integer  NOT NULL,      -- same name as usermaster's key
+    roleid         integer  NOT NULL,      -- same name as rolemaster's key (not rolid, not role_id)
+    ...audit block...
+    CONSTRAINT fk_userrolemap_user FOREIGN KEY (userid) REFERENCES usermaster (userid),
+    CONSTRAINT fk_userrolemap_role FOREIGN KEY (roleid) REFERENCES rolemaster (roleid)
+);
 ```
 
-Zero variance. The most consistent thing in the schema.
+The link column is spelled exactly like the target's key; a misspelling (`rolid`) is a bug.
 
-### [B] The five-column audit block — 107/111 verbatim
+- Two links to the same table: put a qualifier **in front**, keep the `<entity>id` ending:
+  `parentcategoryid`, `baseunitid` / `salesunitid`, `billingaddressid`.
+- A link to the user table that records who did something is `<verb>by`, not `<verb>userid`:
+  `createdby`, `updatedby`, `approvedby`, `cancelledby`, `verifiedby`.
+
+### R6 [must] Every foreign key points at the target's primary key
+
+`REFERENCES usermaster(userid)`. Never at a code or another column, never composite.
+
+---
+
+## The audit block
+
+### R7 [must] Every table ends with the five audit columns, in this order
 
 ```sql
 createdby  integer   DEFAULT 1     NOT NULL,
@@ -119,284 +104,148 @@ updatedat  timestamp DEFAULT now() NOT NULL,
 isdeleted  smallint  DEFAULT 0     NOT NULL
 ```
 
-It sits as a block **near the end** of the table, `isdeleted` last. Order is
-stable across all 107.
+They are the last five columns, `isdeleted` last. Constraints may follow them.
 
-The four exceptions are all **append-only log tables**, and the omission is
-principled — a row never updated needs no `updatedby`/`updatedat`, a row never
-retracted needs no `isdeleted`: `partyledger`, `salesactivitylog`,
-`salespersonlocationlog`, `adminusercreationlog`.
+### R8 [must] Append-only log tables: `createdby` + `createdat` only
 
-**Rule:** all five, always — *unless* the table is strictly append-only, in which
-case `createdby` + `createdat` only, **and say so in a comment**.
+A table whose rows are never updated or retracted (name ends in `log`, or marked
+`-- append-only` in a comment right above it) keeps only `createdby` and `createdat`
+as its last two columns, with a comment saying it is append-only.
 
-`DEFAULT 1` on `createdby`/`updatedby` is a legacy convenience (user id 1), not a
-statement of correctness. Keep it for consistency; the models pass a real user id
-on every write. Do not rely on it.
+### R9 [default] `DEFAULT 1` is a fallback, not the truth
 
-### [A] Deletes are soft, and no FK cascades
-
-`isdeleted smallint DEFAULT 0 NOT NULL` on 107/111 tables, zero variance in type
-or default.
-
-**All 304 foreign keys use the default `NO ACTION`.** Not one `ON DELETE
-CASCADE`, not one `ON DELETE SET NULL`. Rows are never physically removed, so
-cascade semantics would be dead code — and a hard `DELETE` on a parent now fails
-loudly, which is the intended safety net.
-
-### [A] Every FK points at `<table>(id)` — 304/304
-
-No composite FKs, no FK to a non-PK column.
-
-### [A] Zero triggers
-
-Nothing is maintained by the database. `updatedat` is written by the application
-on every UPDATE (312 occurrences of `updatedat = NOW()` in the models); soft
-deletes are application UPDATEs; derived totals are `GENERATED … STORED` (5
-columns) or recomputed in a model.
+The app passes the real user id on every insert and update. Never rely on the default.
 
 ---
 
-## 3. Types
+## Deleting and the database doing work
 
-### [A] Booleans are `int2` (`smallint`) holding 0/1
+### R10 [must] Soft delete only
 
-**223 `int2` columns; exactly 1 real `bool`** in the whole schema (deviation D4).
-Postgres `boolean` is not used, and `true`/`false` never appears as a default.
+A delete is `UPDATE ... SET isdeleted = 1, updatedby = <user>, updatedat = now()`.
+Rows are never physically removed. No `DELETE` statements in migrations or app code.
 
-Naming: `is*` (191), `can*` (6), `allow*` (2), `auto*` (1). Defaults: `0` ×173,
-`1` ×46. **210/223 are `NOT NULL`.** ~23 `int2` columns are genuinely small
-integers reusing the type (`sortorder`, `failedloginattempts`, `priority`,
-`durationdays`) — that reuse is deliberate and fine.
+### R11 [must] No cascades
 
-### [A] Enums are `varchar` + CHECK — never a Postgres `ENUM` type
+Foreign keys use the default (no action). No `ON DELETE CASCADE`, `ON DELETE SET NULL`,
+`ON UPDATE CASCADE`. A hard delete of a parent then fails loudly, which is the safety net.
 
-**Zero `CREATE TYPE … AS ENUM`.** Every state machine, category and mode is a
-`varchar(20)` or `varchar(30)` holding a lowercase `snake_case` token. Widening a
-state machine is an app change plus a CHECK edit, never `ALTER TYPE`.
+### R12 [must] Nothing is maintained by the database
 
-Value casing is `lower_snake_case` (`tax_invoice`, `partially_received`,
-`on_leave`, `raw_material`, `quality_check`). Three deliberate uppercase
-exceptions, all external/industry codes: `httpmethod` (`GET`/`POST`),
-`valuationmethod` (`FIFO`/`LIFO`/`AVCO`/`STANDARD`), `licencetype`
-(`LMV`/`HMV`/`HGMV`/`MCWG`/`Other`).
-
-### [A] Timestamps are `timestamp` without time zone
-
-277 `*at` columns, 276 of them `timestamp`; 1 `timestamptz` (deviation D3).
-`date` is used for business dates — `invoicedate`, `duedate`, `paymentdate`,
-`effectivefrom` — 65 columns, never `timestamp` for those.
-
-### The type dictionary
-
-Pick from this table. It is what a reviewer expects.
-
-| Semantic                      | Type              | Count | Notes                                              |
-| ----------------------------- | ----------------- | ----- | -------------------------------------------------- |
-| Money / totals / tax amounts  | `numeric(14,2)`   | 134   | `subtotal`, `totalamount`, `cgstamount`, `balancedue` |
-| Quantities and unit prices    | `numeric(14,4)`   | 76    | 4 dp for part-units                                 |
-| Percentages                   | `numeric(5,2)`    | 36    | `discountpercentage`, `cgstpercentage`              |
-| Round-off                     | `numeric(6,2)`    | —     | `roundoffamount`                                    |
-| Latitude / longitude          | `numeric(10,8)` / `numeric(11,8)` | 7 each | |
-| Timestamps                    | `timestamp`       | 282   | never `timestamptz`                                 |
-| Business dates                | `date`            | 65    |                                                     |
-| Booleans                      | `int2` 0/1        | 223   |                                                     |
-| Free text / notes             | `text`            | 86    | `remarks` is `text NULL` in 25/25; `notes` in 13/13 |
-| Person / party names          | `varchar(150)`    | 52    | 200 for product/long names                          |
-| Short codes                   | `varchar(20)`     | 56    |                                                     |
-| Document numbers              | `varchar(50)`     | 39    |                                                     |
-| Status / type / mode          | `varchar(20|30)`  | 133+  | 20 for simple states, 30 for longer vocabularies    |
-| Email                         | `varchar(150)`    | 13    |                                                     |
-| Phone / mobile                | `varchar(20)`     | 14    |                                                     |
-| GSTIN / PAN / pincode         | `varchar(20)`     | 12    | uniformly 20                                        |
-| Address line                  | `varchar(200)`    | 11    |                                                     |
-| City / state / country        | `varchar(100)`    | 18    | uniform                                             |
-| URLs / file paths             | `varchar(500)`    | 11    | uniform                                             |
-| SHA-256 hex hashes            | `varchar(64)`     | —     |                                                     |
-| Sort order                    | `int2 DEFAULT 0 NOT NULL` | 6 |                                                 |
-| JSON payloads                 | `jsonb`           | 2     | rare — prefer real columns                          |
-
-**The varchar length ladder**, by frequency: `20` ×86, `100` ×81, `50` ×58,
-`30` ×47, `200` ×40, `150` ×27, `500` ×11, `255` ×10, `64` (hashes). Stick to
-it — a `varchar(37)` will look wrong, and there is exactly one unbounded
-`varchar` in the schema (deviation D7).
-
-`jsonb` twice in 2 061 columns is the measurement, not an oversight. If the shape
-of the data is unclear, that is a question for the user, not a reason for a blob.
+No triggers. No MySQL `ON UPDATE CURRENT_TIMESTAMP`. No Mongoose `timestamps: true`.
+The app sets `updatedat` (and `updatedby`) on every update. Computed stored columns
+are allowed for derived values (engines.md), triggers are not.
 
 ---
 
-## 4. Tenancy
+## Types
 
-### [B] `organizationid` is the boundary — 67/111 tables
+### R13 [must] Booleans are smallint holding 0 or 1
 
-```sql
-organizationid integer NOT NULL,   -- always the SECOND column, right after id
-CONSTRAINT fk_<table>_org FOREIGN KEY (organizationid)
-    REFERENCES public.organizationmaster(id)
-```
+Never a boolean / bool / bit type. `NOT NULL` with a default (`0` or `1`) and a CHECK
+`IN (0, 1)`. Names start with `is`, `can`, `allow` or `has`.
 
-The 44 tables without it are three clean groups:
+### R14 [must] `isactive` is separate from `isdeleted`, never conflated
 
-1. **Platform-level / cross-tenant** — `usermaster`, `rolemaster`,
-   `permissionmaster`, `modulemaster`, `plan*`, `subscription*`,
-   `superadminusermaster`, `organizationmaster` itself, `usersessionmaster`,
-   `userotpmaster`, `usersettings`.
-2. **Line-item / child tables** inheriting tenancy through the parent FK.
-3. A few contact/map children.
-
-Group 2 is **not** universal, and the schema is genuinely split: the two newest
-child tables (`grnlinebatch`, `invoicelinebatch`) carry `organizationid` while
-the older ones (`invoicelineitem`, `grnlineitem`, `creditnoteitem`) do not.
-
-**Rule for new work: carry `organizationid` on children too**, and index
-`(organizationid, isdeleted)`. It costs 4 bytes and removes a whole class of
-tenancy bug — a direct child-table scan without a parent join is otherwise
-untenanted.
-
-Deliberately nullable in two places: `organizationsettings` (a NULL row is the
-platform default, enforced by two complementary partial unique indexes) and
-`auditlogmaster` (platform-level events).
-
-**Always add the FK.** Five tables have the column without it (D6); nothing stops
-an orphan org id there.
-
-### [B] `isactive` is separate from `isdeleted`, never conflated
-
-`40/111` tables carry `isactive int2 DEFAULT 1 NOT NULL`. **All 40 also have
-`isdeleted`.**
-
-- `isdeleted = 1` → the row is gone; it never appears in any list.
-- `isactive = 0` → the row exists and is still referenced by history, but must
+- `isdeleted = 1`: the row is gone and never appears in any list.
+- `isactive = 0`: the row still exists and is still referenced by history, but must
   not be offered for new use.
 
-`isactive` belongs on **master/reference tables** (`productmaster`,
-`customermaster`, `warehousemaster`, `brandmaster`, `taxmaster`, `unitmaster`).
-It does **not** belong on documents — `invoicemaster`, `grnmaster`,
-`salesordermaster` and `paymentmaster` have none, because a document's lifecycle
-lives in its `status` column instead.
+`isactive smallint DEFAULT 1 NOT NULL` belongs on master/reference tables. Documents
+do not get it; their lifecycle is their `status` column. A table with `isactive` always
+also has `isdeleted`.
+
+### R15 [must] Status and type values are text + a CHECK, never an ENUM type
+
+`varchar(20)` for simple states, `varchar(30)` for longer lists. Values are lowercase
+snake_case (`partially_received`, `on_leave`). Uppercase only for external codes
+(`GET`, `FIFO`). **Every `status` column has a CHECK** listing its allowed values.
+Adding a value later = an app change + replacing the CHECK, never altering a type.
+
+### R17 [must] Timestamps without time zone; business dates as dates
+
+Event times (`*at`) are timestamp without time zone, stored in one agreed zone.
+Business dates (`invoicedate`, `duedate`, `effectivefrom`) are a date type, not a timestamp.
+
+### R18 [default] Type dictionary and varchar ladder
+
+| Meaning                    | Type                          |
+| -------------------------- | ----------------------------- |
+| Money, totals, tax amounts | decimal(14,2)                 |
+| Quantities, unit prices    | decimal(14,4)                 |
+| Percentages                | decimal(5,2)                  |
+| Latitude / longitude       | decimal(10,8) / decimal(11,8) |
+| Free text, notes, remarks  | text                          |
+| Person or party names      | varchar(150)                  |
+| Product or long names      | varchar(200)                  |
+| Short codes                | varchar(20)                   |
+| Document numbers           | varchar(50)                   |
+| Email                      | varchar(150)                  |
+| Phone / mobile             | varchar(20)                   |
+| Tax ids, pincodes          | varchar(20)                   |
+| Address line               | varchar(200)                  |
+| City, state, country       | varchar(100)                  |
+| URLs, file paths           | varchar(500)                  |
+| SHA-256 hex hash           | varchar(64)                   |
+| Sort order                 | smallint DEFAULT 0 NOT NULL   |
+
+Varchar lengths come only from this ladder: **20, 30, 50, 64, 100, 150, 200, 255, 500**.
+Never an unbounded varchar.
+
+### R19 [default] No JSON blobs
+
+Avoid json/jsonb (or a free-form object in MongoDB). If the shape is unclear, ask
+the user for the fields and make them real columns.
 
 ---
 
-## 5. Constraints and indexes
+## Tenancy
 
-### [B] Document numbers are unique **per organization**
+### R16 [must when multi-tenant] `organizationid` on every tenant table
 
-24 document-number columns. The canonical shape:
+Only when the project is multi-tenant. Then:
 
-```sql
--- preferred for anything soft-deletable:
-CREATE UNIQUE INDEX IF NOT EXISTS uq_<doc>_org_number
-    ON public.<table> (organizationid, <doc>number) WHERE isdeleted = 0;
-```
-
-A plain `UNIQUE (organizationid, <col>)` constraint is also in use and is
-acceptable — but it blocks reusing a code after a soft delete, so prefer the
-partial index unless reuse must be prevented forever (document numbers must
-never be reissued; product codes usually should be reusable).
-
-Numbers are minted by `src/utils/docNumber.js` using `pg_advisory_xact_lock` +
-`MAX()` over a regex — **not** a sequence, and **not** `COUNT(*)` (recorded as a
-fixed bug in `scripts/doc_number_unique.sql`). Soft-deleted rows are deliberately
-included in the `MAX`, so a number is never reissued.
-
-### [B] Partial indexes filter on `isdeleted = 0` — 56 of 109
-
-The most common shape is the tenant-scoped list index. Every table with
-`organizationid` should have one:
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_<table>_org
-    ON public.<table> (organizationid, isdeleted);
-```
-
-Add one partial index per hot filter — the columns the API will actually filter
-and sort on. `(organizationid, status, <doc>date)` for a document; the parent id
-for a line item.
-
-### CHECK constraints — 43, two jobs
-
-**(a) Enum guards** (23) — always the `= ANY (ARRAY[…])` form:
-
-```sql
-CONSTRAINT chk_batch_status CHECK (((status)::text = ANY ((ARRAY[
-    'active'::character varying, 'expired'::character varying,
-    'quarantine'::character varying, 'consumed'::character varying,
-    'returned'::character varying])::text[])))
-```
-
-**(b) Business invariants** (20) — non-negativity, date ordering, mutual
-exclusion. These are the cheapest correctness win in the whole schema:
-
-```sql
-CONSTRAINT chk_delivery_dates      CHECK (deliverydate IS NULL OR deliverydate >= scheduleddate)
-CONSTRAINT chk_spa_amount_positive CHECK (allocatedamount > 0::numeric)
-CONSTRAINT chk_vanreturnli_damaged_qty CHECK (damagedquantity <= returnedquantity)
-CONSTRAINT chk_paymentalloc_one_target CHECK (
-    (invoiceid IS NOT NULL AND debitnoteid IS NULL) OR
-    (invoiceid IS NULL AND debitnoteid IS NOT NULL))
-```
-
-### EXCLUDE constraints — 2, for temporal non-overlap
-
-The house answer to "two dated assignments must not overlap" — reach for this
-rather than an application check. Both existing ones are gated on
-`isdeleted = 0`:
-
-```sql
-CONSTRAINT no_overlap_pricing EXCLUDE USING gist (
-    productid WITH =, customercategoryid WITH =,
-    daterange(effectivefrom, COALESCE(effectiveto, '9999-12-31'::date), '[)') WITH &&
-) WHERE (isdeleted = 0)
-```
-
-Requires `CREATE EXTENSION IF NOT EXISTS btree_gist;` for the `WITH =` parts.
+- `organizationid integer NOT NULL` is the second column, right after the primary key.
+- It always has a foreign key to `organizationmaster(organizationid)`.
+- Child tables carry it too, not only through their parent.
+- Index `(organizationid, isdeleted)`; every unique rule includes `organizationid`.
+  Platform tables (users, roles, permissions, the organization table itself) do not carry it.
 
 ---
 
-## 6. The deviation register — do NOT propagate these
+## Constraints and indexes
 
-Real inconsistencies in the existing schema. Each is a decision a new table
-should not copy.
+### R20 [default] Unique rules ignore deleted rows
 
-| #   | Deviation                                                       | Scale       | Rule for new work                                       |
-| --- | --------------------------------------------------------------- | ----------- | ------------------------------------------------------- |
-| D1  | `<table>_id` FK naming (`usermaster_id`) + `snake_case` in the payment-gateway pocket | 25 columns | `<entity>id`, no underscore. Don't "fix" the old ones — auth reads them |
-| D2  | `GENERATED BY DEFAULT AS IDENTITY` PKs                          | 2 tables    | `serial` / `bigserial`                                  |
-| D3  | `salesordermaster.cancelledat timestamptz`                      | 1 column    | `timestamp`                                             |
-| D4  | `planmaster.isvisible bool DEFAULT true`                        | 1 column    | `int2 DEFAULT 0|1 NOT NULL` — frontend does `flag === 1` |
-| D5  | `organizationid` inconsistent on child tables                   | ~16 tables  | Carry it on children                                    |
-| D6  | `organizationid` with no FK                                     | 5 tables    | Always add the FK                                       |
-| D7  | `usermaster.fullname varchar` unbounded                         | 1 column    | Always a length from the ladder                         |
-| D8  | `invoicemaster.invoicenumber` globally unique, not per-org      | 1 constraint| **High impact** — two tenants cannot both issue `INV-0001`. Always org-scope |
-| D9  | 22 `status` columns with no CHECK                               | 22 columns  | Always add `chk_<entity>_status`                        |
+A unique code or number is unique among rows with `isdeleted = 0`, so a deleted row
+does not block reusing the code. (Document numbers that must never be reissued are
+the exception: unique across all rows.) Spelling per database: engines.md.
 
-D8 and D9 are the two worth mentioning to the user when they touch a table that
-has them: a typo'd status writes cleanly and then never matches a filter, and the
-global unique surfaces as a duplicate-key error in an unrelated tenant.
+### R21 [default] Indexes for real filters, named by prefix
+
+- One index per filter the screens actually use (status + date for documents, the parent id for line items).
+- Names: `idx_<table>_<what>` (index), `uq_<table>_<what>` (unique), `chk_<table>_<what>` (CHECK),
+  `fk_<table>_<target>` (foreign key). Name every constraint by hand.
+
+### R22 [default] CHECK the business facts
+
+Cheap correctness: amounts > 0, quantities >= 0, end date >= start date, exactly one of two links set.
 
 ---
 
-## 7. The other half of the contract — how the tables are queried
+## Migrations and queries
 
-Rules a DDL-only reader would miss. Measured across 61 model files. A table
-designed without these in mind will be technically fine and practically wrong.
+### R23 [must] Migrations are dated, re-runnable and reversible
 
-| Rule                                                     | Evidence                                              |
-| -------------------------------------------------------- | ----------------------------------------------------- |
-| Every `SELECT` filters `isdeleted = 0`                    | 1 164 occurrences                                      |
-| Delete is `UPDATE … SET isdeleted = 1, updatedat = NOW(), updatedby = $n` | 77 occurrences across 21 model files   |
-| `updatedat` is set **by hand** on every UPDATE            | 312 occurrences. No trigger. Forgetting it is silent   |
-| Every business query is scoped by `organizationid`        | org id comes from the `X-Org-Id` header via `resolveOrg` middleware |
-| Raw parameterized SQL only — no ORM                       | `query(sql, params)` from `src/config/database.js`     |
-| Multi-statement writes use `withTransaction`              | posting/reversing documents, stock movement, allocations |
-| Generated codes use advisory locks                        | `pg_advisory_xact_lock($classId, $orgId)` before `MAX()` |
-| Nullability is read from `information_schema`, not assumed| `master.model.js` caches `columnMeta(table)` — sending `''` to a `NOT NULL` column produced 23502s |
+- File name `YYYYMMDD_<what>` so files sort in the order written.
+- Re-runnable: `IF NOT EXISTS` wherever the database supports it.
+- One concern per file. A header saying what and why. A **commented** rollback at the end.
+- A migration that has run anywhere except the author's machine is never edited; write a new one.
 
-`NOW()` is the uppercase spelling in application SQL (300 uses vs 12 lowercase);
-`now()` is the lowercase spelling in DDL defaults. Both are the same function —
-match the surrounding file.
+### R24 [must] How the tables are queried
 
-**The design consequence:** a `NOT NULL` column with no default is a trap for the
-generic master model, which sends `''` for an omitted field. Either give it a
-default, or confirm the write path always supplies it.
+- Every read filters `isdeleted = 0`.
+- Every update sets `updatedat = now()` and `updatedby = <user>`.
+- A delete is the soft-delete UPDATE in R10.
+- A NOT NULL column with no default is a trap if the app may omit it: give it a default
+  or confirm the write path always sends it.
