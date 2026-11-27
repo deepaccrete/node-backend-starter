@@ -20,6 +20,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "migrate": "tsx scripts/migrate.ts up",
+    "migrate:status": "tsx scripts/migrate.ts status",
     "create-admin": "tsx scripts/create-admin.ts",
     "gen:openapi": "tsx scripts/gen-openapi.ts"
   },

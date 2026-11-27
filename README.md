@@ -29,12 +29,11 @@ pnpm create-admin        # the Super Admin: asks for username, name, password
 pnpm dev                 # http://localhost:8001/api/v1
 ```
 
-The database in `DB_NAME` must already exist, with its tables. Development uses the
-company PostgreSQL server, database `tpjp`. There is no migration runner: the schema
-is `migrations/20261126_create_customer_masters.sql`, applied by hand (DBeaver). Every
-statement uses `IF NOT EXISTS`, so running it again is safe. To work offline instead:
+The database in `DB_NAME` must already exist. Development uses the company PostgreSQL
+server, database `tpjp`. The schema is the `.sql` files in `migrations/`, applied in
+order by `pnpm migrate` (see `migrations/README.md`). To work offline instead:
 `docker compose up -d db` starts PostgreSQL 16 on port **5433** (set `DB_PORT=5433`),
-then apply the same file to it.
+then run `pnpm migrate` against it.
 
 Check it is up: `http://localhost:8001/api/v1/health` (process) and
 `/api/v1/health/ready` (database). The live contract is at `/api/v1/openapi.json`
@@ -53,6 +52,7 @@ Check it is up: `http://localhost:8001/api/v1/health` (process) and
 | `pnpm lint` / `pnpm lint:fix`                          | ESLint, zero warnings allowed         |
 | `pnpm format` / `pnpm format:check`                    | Prettier                              |
 | `pnpm test` / `pnpm test:watch` / `pnpm test:coverage` | Vitest + Supertest                    |
+| `pnpm migrate` / `pnpm migrate:status`                 | Apply / list `migrations/*.sql`       |
 | `pnpm create-admin`                                    | Create the Super Admin account        |
 | `pnpm gen:openapi`                                     | Regenerate `openapi.json` (commit it) |
 
