@@ -8,11 +8,7 @@ import { parseEnv } from '../src/config/env.js';
 
 const valid = {
     PORT: '8001',
-    DB_HOST: 'db',
-    DB_PORT: '5432',
-    DB_NAME: 'app',
-    DB_USER: 'app',
-    DB_PASSWORD: '',
+    MONGODB_URI: 'mongodb://db:27017/app',
     // @auth-start
     JWT_ACCESS_SECRET: 'a'.repeat(32),
     JWT_REFRESH_SECRET: 'b'.repeat(32),
@@ -22,22 +18,33 @@ const valid = {
 describe('parseEnv', () => {
     it('accepts a complete configuration and applies the agreed defaults', () => {
         const env = parseEnv(valid);
-        expect(env.db.port).toBe(5432);
+        expect(env.db.uri).toBe('mongodb://db:27017/app');
         // @auth-start
         expect(env.auth.accessTtlSeconds).toBe(15 * 60);
         expect(env.auth.refreshTtlSeconds).toBe(7 * 24 * 60 * 60);
         // @auth-end
-        expect(env.db.ssl).toBe(false);
     });
 
-    it('names a missing connection setting instead of defaulting it', () => {
-        const { DB_NAME: _omit, ...rest } = valid;
-        expect(() => parseEnv(rest)).toThrow(/DB_NAME/);
+    it('names a missing connection string instead of defaulting it', () => {
+        const { MONGODB_URI: _omit, ...rest } = valid;
+        expect(() => parseEnv(rest)).toThrow(/MONGODB_URI/);
     });
 
-    it('requires DB_PASSWORD to be present even when empty', () => {
-        const { DB_PASSWORD: _omit, ...rest } = valid;
-        expect(() => parseEnv(rest)).toThrow(/DB_PASSWORD/);
+    it('accepts Atlas (mongodb+srv) strings with options', () => {
+        const uri = 'mongodb+srv://u:p@cluster0.example.net/tpjp?retryWrites=true&w=majority';
+        expect(parseEnv({ ...valid, MONGODB_URI: uri }).db.uri).toBe(uri);
+    });
+
+    it('rejects a string that is not MongoDB or names no database', () => {
+        expect(() => parseEnv({ ...valid, MONGODB_URI: 'postgres://db:5432/app' })).toThrow(
+            /must start with mongodb/
+        );
+        expect(() => parseEnv({ ...valid, MONGODB_URI: 'mongodb://db:27017' })).toThrow(
+            /must name the database/
+        );
+        expect(() => parseEnv({ ...valid, MONGODB_URI: 'mongodb://db:27017/?tls=true' })).toThrow(
+            /must name the database/
+        );
     });
 
     // @auth-start
@@ -55,11 +62,5 @@ describe('parseEnv', () => {
             parseEnv({ ...valid, NODE_ENV: 'production', CORS_ORIGIN: 'https://a.example' })
                 .corsOrigins
         ).toEqual(['https://a.example']);
-    });
-
-    it('verifies the database certificate when SSL is required', () => {
-        expect(parseEnv({ ...valid, DB_SSL: 'require' }).db.ssl).toEqual({
-            rejectUnauthorized: true,
-        });
     });
 });

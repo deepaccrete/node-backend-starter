@@ -1,18 +1,24 @@
 /**
  * Authentication — coordinates the user and session models and the tokens.
  *
- * A service, not a model, because each flow spans two tables plus token signing.
+ * A service, not a model, because each flow spans two collections plus token signing.
  * Reached only from the auth controller, never directly from a route.
  */
 
 import bcrypt from 'bcryptjs';
 
-import { withTransaction } from '../config/database.js';
 import { env } from '../config/env.js';
 import { permissionsFor, type Permission, type Role } from '../config/permissions.js';
 import { SessionModel } from '../models/auth/session.model.js';
 import { UserModel, type UserRow } from '../models/auth/user.model.js';
-import { LockedError, UnauthorizedError } from '../utils/errors.js';
+import {
+    BadRequestError,
+    LockedError,
+    OtpCooldownError,
+    OtpInvalidError,
+    UnauthorizedError,
+} from '../utils/errors.js';
+import { OtpService } from './otp.service.js';
 import {
     hashToken,
     signAccessToken,
@@ -29,6 +35,8 @@ export interface PublicUser {
     name: string;
     role: Role;
     permissions: Permission[];
+    /** True after an Admin set a temporary password: the client shows change-password first. */
+    mustChangePassword: boolean;
 }
 
 export interface IssuedSession {
@@ -59,12 +67,38 @@ const toPublicUser = (row: UserRow): PublicUser => ({
     name: row.fullname,
     role: row.rolecode,
     permissions: permissionsFor(row.rolecode),
+    mustChangePassword: row.mustchangepassword === 1,
 });
 
 const refreshExpiry = () => new Date(Date.now() + env.auth.refreshTtlSeconds * 1000);
 
 const accessTokenFor = (user: PublicUser, sid: string) =>
-    signAccessToken({ sub: String(user.id), sid, role: user.role, permissions: user.permissions });
+    signAccessToken({
+        sub: String(user.id),
+        sid,
+        role: user.role,
+        permissions: user.permissions,
+        ...(user.mustChangePassword ? { pwc: true } : {}),
+    });
+
+/**
+ * A new session for a user already checked. The token names the session, so its
+ * key is taken first and the session is stored with the token's hash in one
+ * write: no half-made session can exist.
+ */
+async function openSession(user: PublicUser, client: ClientInfo): Promise<IssuedSession> {
+    const sid = await SessionModel.newId();
+    const refreshToken = signRefreshToken({ sub: String(user.id), sid, gen: 1 });
+    await SessionModel.create(sid, user.id, {
+        refreshTokenHash: hashToken(refreshToken),
+        expiresAt: refreshExpiry(),
+        ...client,
+    });
+    return { user, accessToken: accessTokenFor(user, sid), refreshToken };
+}
+
+const RESET_SENT =
+    'If the username and mobile number match an account, a code has been sent to that mobile.';
 
 export const AuthService = {
     async login(
@@ -91,26 +125,11 @@ export const AuthService = {
             throw new UnauthorizedError(INVALID_CREDENTIALS, 'INVALID_CREDENTIALS');
         }
 
-        const publicUser = toPublicUser(user);
-
-        // Two tables change together: the new session row and the user's login counters.
-        const refreshToken = await withTransaction(async (db) => {
-            const session = await SessionModel.create(
-                user.id,
-                { expiresAt: refreshExpiry(), ...client },
-                db
-            );
-            const token = signRefreshToken({ sub: String(user.id), sid: session.id, gen: 1 });
-            await SessionModel.rotate(session.id, 0, hashToken(token), refreshExpiry(), db);
-            await UserModel.recordSuccessfulLogin(user.id, db);
-            return { token, sid: session.id };
-        });
-
-        return {
-            user: publicUser,
-            accessToken: accessTokenFor(publicUser, refreshToken.sid),
-            refreshToken: refreshToken.token,
-        };
+        const session = await openSession(toPublicUser(user), client);
+        // Separate write. If it fails the login fails too; the session just stored is
+        // never handed out and simply expires.
+        await UserModel.recordSuccessfulLogin(user.id);
+        return session;
     },
 
     /**
@@ -122,7 +141,12 @@ export const AuthService = {
         const claims = verifyRefreshToken(token);
         const session = await SessionModel.findById(claims.sid);
 
-        if (!session || session.revokedat || session.expiresat.getTime() <= Date.now()) {
+        // `usermaster_id` is null on an app session: not one this endpoint can refresh.
+        if (
+            session?.usermaster_id == null ||
+            session.revokedat ||
+            session.expiresat.getTime() <= Date.now()
+        ) {
             throw new UnauthorizedError(
                 'Your session has expired. Please sign in again.',
                 'SESSION_EXPIRED'
@@ -188,5 +212,76 @@ export const AuthService = {
         const user = await UserModel.findActiveById(userId);
         if (!user) throw new UnauthorizedError();
         return toPublicUser(user);
+    },
+
+    /**
+     * Change the signed-in user's password. Every session of the user ends (a
+     * stolen session should not outlive a password change) and a fresh one is
+     * returned, so this device stays signed in.
+     */
+    async changePassword(
+        userId: number,
+        currentPassword: string,
+        newPassword: string,
+        client: ClientInfo
+    ): Promise<IssuedSession> {
+        const hash = await UserModel.findPasswordHashById(userId);
+        if (!hash) throw new UnauthorizedError();
+        if (!(await bcrypt.compare(currentPassword, hash))) {
+            throw new BadRequestError('Your current password is not right.', 'VALIDATION_FAILED', [
+                { field: 'currentPassword', message: 'Your current password is not right.' },
+            ]);
+        }
+        if (await bcrypt.compare(newPassword, hash)) {
+            throw new BadRequestError(
+                'Choose a password different from the current one.',
+                'VALIDATION_FAILED',
+                [
+                    {
+                        field: 'newPassword',
+                        message: 'Choose a password different from the current one.',
+                    },
+                ]
+            );
+        }
+        await UserModel.setPassword(userId, await hashPassword(newPassword), 0, userId);
+        await SessionModel.revokeAllForUser(userId);
+        const user = await UserModel.findActiveById(userId);
+        if (!user) throw new UnauthorizedError();
+        return openSession(toPublicUser(user), client);
+    },
+
+    /**
+     * Text a reset code to the user's registered mobile. The answer is the same
+     * whether or not the details match, so this cannot be used to find accounts.
+     */
+    async forgotPassword(usernameInput: string, mobileno: string): Promise<string> {
+        const userId = await UserModel.findIdForReset(normaliseUsername(usernameInput), mobileno);
+        if (userId === null) return RESET_SENT;
+        try {
+            await OtpService.issue(
+                { purpose: 'PASSWORD_RESET', mobileno },
+                (code, minutes) =>
+                    `${code} is your TPJP password reset code. It expires in ${minutes} minutes. Do not share it.`
+            );
+        } catch (err) {
+            // Saying "wait" only for real accounts would reveal which ones exist.
+            if (!(err instanceof OtpCooldownError)) throw err;
+        }
+        return RESET_SENT;
+    },
+
+    /** Set a new password with the texted code. Ends every session of the user. */
+    async resetPassword(
+        usernameInput: string,
+        mobileno: string,
+        code: string,
+        newPassword: string
+    ): Promise<void> {
+        const userId = await UserModel.findIdForReset(normaliseUsername(usernameInput), mobileno);
+        if (userId === null) throw new OtpInvalidError();
+        await OtpService.verify({ purpose: 'PASSWORD_RESET', mobileno }, code);
+        await UserModel.setPassword(userId, await hashPassword(newPassword), 0, userId);
+        await SessionModel.revokeAllForUser(userId);
     },
 };

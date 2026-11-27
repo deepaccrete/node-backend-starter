@@ -13,7 +13,7 @@ import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
 import type { ErrorCode } from '../utils/errorCodes.js';
 import { AppError } from '../utils/errors.js';
-import { friendlyDbError } from '../utils/pgError.js';
+import { friendlyDbError } from '../utils/mongoError.js';
 
 export const CORS_REJECTED = 'Not allowed by CORS';
 
@@ -28,15 +28,14 @@ const statusOf = (err: unknown): number => {
 };
 
 export const errorHandler: ErrorRequestHandler = (err: unknown, req, res, _next) => {
-    // A constraint violation is bad input: 400 naming the fields at fault.
+    // A duplicate key or a schema validation failure is bad input: 400 naming the fields at fault.
     const friendly = friendlyDbError(err);
     if (friendly) {
-        const e = err as { code?: string; constraint?: string };
-        logger.warn('Rejected by database constraint', {
+        logger.warn('Rejected by the database', {
             requestId: req.id,
             path: req.originalUrl,
-            code: e.code,
-            constraint: e.constraint,
+            name: err instanceof Error ? err.name : undefined,
+            fields: friendly.fields,
         });
         res.status(400).json({
             success: false,

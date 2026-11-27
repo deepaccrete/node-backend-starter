@@ -5,7 +5,6 @@ logs
 uploads
 .git
 .github
-.husky
 .env
 .env.*
 !.env.example

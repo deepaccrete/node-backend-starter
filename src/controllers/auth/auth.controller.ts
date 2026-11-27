@@ -14,7 +14,12 @@ import { project } from '../../config/project.js';
 import { AuthService, type IssuedSession } from '../../services/auth.service.js';
 import { UnauthorizedError } from '../../utils/errors.js';
 import { success } from '../../utils/response.js';
-import type { LoginBody } from '../../routes/auth/auth.route.js';
+import type {
+    ChangePasswordBody,
+    ForgotPasswordBody,
+    LoginBody,
+    ResetPasswordBody,
+} from '../../routes/auth/auth.route.js';
 
 export const REFRESH_COOKIE = `${project.slug}_rt`;
 
@@ -24,6 +29,11 @@ const cookieOptions = (): CookieOptions => ({
     secure: env.NODE_ENV !== 'development',
     sameSite: 'strict',
     path: `${env.API_PREFIX}/auth`,
+});
+
+export const clientOf = (req: Request) => ({
+    userAgent: req.get('user-agent') ?? null,
+    ipAddress: req.ip ?? null,
 });
 
 const readRefreshCookie = (req: Request): string | undefined => {
@@ -43,10 +53,7 @@ function sendSession(res: Response, session: IssuedSession, message: string) {
 export const AuthController = {
     login: async (req: Request, res: Response) => {
         const { username, password } = req.body as LoginBody;
-        const session = await AuthService.login(username, password, {
-            userAgent: req.get('user-agent') ?? null,
-            ipAddress: req.ip ?? null,
-        });
+        const session = await AuthService.login(username, password, clientOf(req));
         return sendSession(res, session, 'Signed in');
     },
 
@@ -71,5 +78,30 @@ export const AuthController = {
     me: async (req: Request, res: Response) => {
         if (!req.user) throw new UnauthorizedError();
         return success(res, await AuthService.currentUser(req.user.id), 'Signed-in user');
+    },
+
+    changePassword: async (req: Request, res: Response) => {
+        if (!req.user) throw new UnauthorizedError();
+        const { currentPassword, newPassword } = req.body as ChangePasswordBody;
+        const session = await AuthService.changePassword(
+            req.user.id,
+            currentPassword,
+            newPassword,
+            clientOf(req)
+        );
+        return sendSession(res, session, 'Password changed');
+    },
+
+    forgotPassword: async (req: Request, res: Response) => {
+        const { username, mobile } = req.body as ForgotPasswordBody;
+        const message = await AuthService.forgotPassword(username, mobile);
+        return success(res, { message }, message);
+    },
+
+    resetPassword: async (req: Request, res: Response) => {
+        const { username, mobile, otp, newPassword } = req.body as ResetPasswordBody;
+        await AuthService.resetPassword(username, mobile, otp, newPassword);
+        const message = 'Password reset. Sign in with your new password.';
+        return success(res, { message }, message);
     },
 };

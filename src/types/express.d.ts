@@ -10,6 +10,16 @@ export interface AuthUser {
     permissions: Permission[];
     /** Session id from the token; names the authsession row. */
     sid: string;
+    /** Signed in with a temporary password that must be changed first. */
+    mustChangePassword: boolean;
+}
+
+/** The signed-in telecaller number, set by the `authenticateApp` middleware. */
+export interface AppContact {
+    /** `distributorcontactid`. */
+    id: number;
+    distributorid: number;
+    sid: string;
 }
 // @auth-end
 
@@ -22,6 +32,7 @@ declare global {
 
             // @auth-start
             user?: AuthUser;
+            contact?: AppContact;
             // @auth-end
             /** Values parsed by the `validate` middleware (typed copies of body/query/params). */
             validated: { body?: unknown; query?: unknown; params?: unknown };

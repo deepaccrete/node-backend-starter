@@ -42,3 +42,16 @@ export function isRole(value: unknown): value is Role {
 export function permissionsFor(role: Role): Permission[] {
     return [...ROLE_PERMISSIONS[role]];
 }
+
+/**
+ * Who a role reports to, one level up. Null: the role reports to no one in TPJP.
+ * Proposed from the Scope of Work (ASM → RM → ZM → GM); Lotte confirms the final
+ * structure during design.
+ */
+export const REPORTS_TO_ROLE: Record<Role, Role | null> = {
+    ADMIN: null,
+    GM: null,
+    ZM: 'GM',
+    RM: 'ZM',
+    ASM: 'RM',
+};

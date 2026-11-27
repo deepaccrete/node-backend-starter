@@ -14,7 +14,6 @@ import 'dotenv/config';
 import fs from 'node:fs';
 
 import { createApp } from '../src/app.js';
-import { pool } from '../src/config/database.js';
 import { env } from '../src/config/env.js';
 import { generateOpenApiDocument } from '../src/openapi/registry.js';
 import { APP_VERSION } from '../src/utils/version.js';
@@ -23,4 +22,3 @@ await createApp();
 const document = generateOpenApiDocument(env.API_PREFIX, APP_VERSION);
 fs.writeFileSync('openapi.json', `${JSON.stringify(document, null, 2)}\n`);
 console.log(`openapi.json written (${Object.keys(document.paths ?? {}).length} paths).`);
-await pool.end();

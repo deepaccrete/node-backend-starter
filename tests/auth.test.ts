@@ -10,8 +10,8 @@ import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type * as DatabaseModule from '../src/config/database.js';
 import type { Role } from '../src/config/permissions.js';
+import type * as UserModule from '../src/models/auth/user.model.js';
 
 // ─── In-memory stand-in for usermaster / authsession ──────────────────
 interface FakeUser {
@@ -19,6 +19,7 @@ interface FakeUser {
     username: string;
     fullname: string;
     rolecode: Role;
+    mustchangepassword: number;
     passwordhash: string;
     failedlogins: number;
     lockeduntil: Date | null;
@@ -39,14 +40,11 @@ const store = vi.hoisted(() => ({
     nextSession: 1,
 }));
 
-vi.mock('../src/config/database.js', async (importOriginal) => {
-    const actual = await importOriginal<typeof DatabaseModule>();
-    return { ...actual, withTransaction: (fn: (db: unknown) => Promise<unknown>) => fn(undefined) };
-});
-
-vi.mock('../src/models/auth/user.model.js', () => {
+// The real module's other exports (index names, sort fields) are kept; only the calls are faked.
+vi.mock('../src/models/auth/user.model.js', async (importOriginal) => {
     const byId = (id: number) => [...store.users.values()].find((u) => u.id === id);
     return {
+        ...(await importOriginal<typeof UserModule>()),
         UserModel: {
             findCredentialsByUsername: vi.fn((username: string) =>
                 Promise.resolve(store.users.get(username) ?? null)
@@ -73,18 +71,21 @@ vi.mock('../src/models/auth/user.model.js', () => {
 
 vi.mock('../src/models/auth/session.model.js', () => ({
     SessionModel: {
-        create: vi.fn((userId: number, data: { expiresAt: Date }) => {
-            const s: FakeSession = {
-                id: `00000000-0000-4000-8000-${String(store.nextSession++).padStart(12, '0')}`,
-                usermaster_id: userId,
-                refreshtokenhash: '',
-                generation: 0,
-                expiresat: data.expiresAt,
-                revokedat: null,
-            };
-            store.sessions.set(s.id, s);
-            return Promise.resolve({ ...s });
-        }),
+        newId: vi.fn(() => Promise.resolve(String(store.nextSession++))),
+        create: vi.fn(
+            (id: string, userId: number, data: { refreshTokenHash: string; expiresAt: Date }) => {
+                const s: FakeSession = {
+                    id,
+                    usermaster_id: userId,
+                    refreshtokenhash: data.refreshTokenHash,
+                    generation: 1,
+                    expiresat: data.expiresAt,
+                    revokedat: null,
+                };
+                store.sessions.set(s.id, s);
+                return Promise.resolve({ ...s });
+            }
+        ),
         findById: vi.fn((id: string) => {
             const s = store.sessions.get(id);
             return Promise.resolve(s ? { ...s } : null);
@@ -115,7 +116,7 @@ const { authenticate } = await import('../src/middleware/authenticate.js');
 const { requirePermission } = await import('../src/middleware/requirePermission.js');
 const { errorHandler } = await import('../src/middleware/errorHandler.js');
 const { requestContext } = await import('../src/middleware/requestContext.js');
-const { signAccessToken } = await import('../src/services/token.service.js');
+const { signAccessToken, signAppAccessToken } = await import('../src/services/token.service.js');
 const { REFRESH_COOKIE } = await import('../src/controllers/auth/auth.controller.js');
 const { ROLES } = await import('../src/config/permissions.js');
 
@@ -133,6 +134,7 @@ function addUser(id: number, username: string, rolecode: Role, extra: Partial<Fa
         username,
         fullname: `${username} name`,
         rolecode,
+        mustchangepassword: 0,
         passwordhash: bcrypt.hashSync(PASSWORD, 4), // low cost keeps tests fast
         failedlogins: 0,
         lockeduntil: null,
@@ -358,5 +360,62 @@ describe('requirePermission', () => {
 
     it('answers 401 without a token', async () => {
         expect((await request(guarded).get('/upload')).status).toBe(401);
+    });
+});
+
+describe('temporary password', () => {
+    const bearer = (res: request.Response) =>
+        `Bearer ${(res.body as { data: { accessToken: string } }).data.accessToken}`;
+
+    it('flags the session, allows /auth/me and refuses everything else (PASSWORD_CHANGE_REQUIRED)', async () => {
+        addUser(3, 'newbie', 'ADMIN', { mustchangepassword: 1 });
+        const res = await login('newbie');
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ data: { user: { mustChangePassword: true } } });
+
+        const me = await request(app).get('/api/v1/auth/me').set('Authorization', bearer(res));
+        expect(me.status).toBe(200);
+
+        const users = await request(app).get('/api/v1/users').set('Authorization', bearer(res));
+        expect(users.status).toBe(403);
+        expect(users.body).toMatchObject({ code: 'PASSWORD_CHANGE_REQUIRED' });
+    });
+
+    it('does not flag a normal sign-in', async () => {
+        const res = await login('admin');
+        expect(res.body).toMatchObject({ data: { user: { mustChangePassword: false } } });
+    });
+});
+
+describe('dashboard and app tokens', () => {
+    it('are not accepted in place of each other', async () => {
+        const appToken = signAppAccessToken({ sub: '5', sid: '1', distributorid: 1 });
+        const onDashboard = await request(app)
+            .get('/api/v1/auth/me')
+            .set('Authorization', `Bearer ${appToken}`);
+        expect(onDashboard.status).toBe(401);
+
+        const dashToken = signAccessToken({
+            sub: '1',
+            sid: '1',
+            role: 'ADMIN',
+            permissions: [ADMIN_ONLY],
+        });
+        const onApp = await request(app)
+            .get('/api/v1/app/contacts')
+            .set('Authorization', `Bearer ${dashToken}`);
+        expect(onApp.status).toBe(401);
+    });
+
+    it('/users needs users:manage', async () => {
+        const member = await login('member');
+        const res = await request(app)
+            .get('/api/v1/users')
+            .set(
+                'Authorization',
+                `Bearer ${(member.body as { data: { accessToken: string } }).data.accessToken}`
+            );
+        expect(res.status).toBe(403);
+        expect(res.body).toMatchObject({ code: 'FORBIDDEN' });
     });
 });

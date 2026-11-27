@@ -38,7 +38,6 @@ const AUTH_FILES = [
     'src/middleware/authenticate.ts',
     'src/middleware/requirePermission.ts',
     'src/config/permissions.ts',
-    'migrations/20261008_auth_tables.sql',
     'scripts/create-admin.ts',
     'tests/auth.test.ts',
 ];
@@ -304,14 +303,13 @@ function updateDelivery(a: Answers) {
     edit('.github/workflows/ci.yml', (t) =>
         t
             .replace(/^(\s*)PORT: .*$/m, `$1PORT: ${a.port}`)
-            .replace(/^(\s*)(DB_NAME|POSTGRES_DB): .*$/gm, `$1$2: ${a.db}_ci`)
-            .replace(
-                /^(\s*)(DB_USER|DB_PASSWORD|POSTGRES_USER|POSTGRES_PASSWORD): .*$/gm,
-                `$1$2: ${a.db}`
-            )
-            .replace(/pg_isready -U \S+/g, `pg_isready -U ${a.db}`)
+            .replace(/^(\s*)MONGODB_URI: (mongodb:\/\/[^/]+)\/.*$/m, `$1MONGODB_URI: $2/${a.db}_ci`)
     );
-    edit('docker-compose.yml', (t) => t.replace(/\$\{PORT:-\d+\}/g, `\${PORT:-${a.port}}`));
+    edit('docker-compose.yml', (t) =>
+        t
+            .replace(/\$\{PORT:-\d+\}/g, `\${PORT:-${a.port}}`)
+            .replace(/(mongodb:\/\/(?:db|localhost):27017)\/\w+/g, `$1/${a.db}`)
+    );
     edit('Dockerfile', (t) =>
         t.replace(/^EXPOSE \d+$/m, `EXPOSE ${a.port}`).replace(/PORT\|\|\d+/g, `PORT||${a.port}`)
     );
@@ -362,11 +360,7 @@ run('pnpm exec prettier --write . --log-level warn');
 // throwaway and only exist for this one command.
 run('pnpm gen:openapi', {
     PORT: String(answers.port),
-    DB_HOST: 'localhost',
-    DB_PORT: '5432',
-    DB_NAME: answers.db,
-    DB_USER: answers.db,
-    DB_PASSWORD: '',
+    MONGODB_URI: `mongodb://localhost:27017/${answers.db}`,
     JWT_ACCESS_SECRET: 'x'.repeat(32),
     JWT_REFRESH_SECRET: 'y'.repeat(32),
 });
@@ -376,8 +370,9 @@ Done: ${answers.title} (${answers.slug}-api)
   login: ${answers.auth ? `yes, roles ${answers.roles.join(', ')}` : 'no'}
 
 Next:
-  1. cp .env.example .env and fill in every (required) value (PORT=${answers.port}, DB_NAME=${answers.db})
-  2. pnpm migrate${answers.auth ? '\n  3. pnpm create-admin' : ''}
+  1. cp .env.example .env and fill in every (required) value
+     (PORT=${answers.port}, MONGODB_URI=mongodb://localhost:27017/${answers.db})
+  2. docker compose up -d db${answers.auth ? '\n  3. pnpm create-admin' : ''}
   ${answers.auth ? '4' : '3'}. pnpm dev
   Then commit: git add -A && git commit -m "chore: initialise ${answers.slug}"
 `);

@@ -10,8 +10,6 @@
  * team agreed and can be overridden.
  */
 
-import { readFileSync } from 'node:fs';
-
 import { z } from 'zod';
 
 import { project } from './project.js';
@@ -55,20 +53,17 @@ const schema = z
         HOST: z.string().default('0.0.0.0'),
         API_PREFIX: z.string().startsWith('/').default('/api/v1'),
 
-        DB_HOST: required('DB_HOST'),
-        DB_PORT: port('DB_PORT'),
-        DB_NAME: required('DB_NAME'),
-        DB_USER: required('DB_USER'),
-        // Must be present; may be empty for local trust/peer authentication.
-        DB_PASSWORD: z.string({
-            error: 'DB_PASSWORD is not set. If your database has no password, keep the line empty: DB_PASSWORD=',
-        }),
-        DB_POOL_MIN: int(2),
-        DB_POOL_MAX: int(10),
-        // disable | require. `require` encrypts AND verifies the server certificate.
-        DB_SSL: z.enum(['disable', 'require']).default('disable'),
-        // Path to the CA certificate of a managed database, when it is not in the system store.
-        DB_SSL_CA: z.string().optional(),
+        // One connection string: host, credentials, database name and options (pool size,
+        // TLS) all live in it. The database name is required so data never lands in `test`.
+        MONGODB_URI: required('MONGODB_URI')
+            .regex(
+                /^mongodb(\+srv)?:\/\//,
+                'MONGODB_URI must start with mongodb:// or mongodb+srv://'
+            )
+            .refine(
+                (uri) => /^mongodb(\+srv)?:\/\/[^/]+\/[^/?]+/.test(uri),
+                'MONGODB_URI must name the database, e.g. mongodb://localhost:27017/tpjp'
+            ),
 
         // @auth-start
         JWT_ACCESS_SECRET: required('JWT_ACCESS_SECRET').min(
@@ -83,6 +78,12 @@ const schema = z
         REFRESH_TOKEN_TTL_DAYS: int(7),
         LOGIN_MAX_FAILURES: int(5),
         LOGIN_LOCK_MINUTES: int(15),
+        // One-time codes sent by SMS: lifetime, wrong tries allowed, wait before a resend.
+        OTP_TTL_MINUTES: int(5),
+        OTP_MAX_ATTEMPTS: int(5),
+        OTP_RESEND_SECONDS: int(30),
+        // `log` writes the code to the server log instead of texting it (development only).
+        SMS_PROVIDER: z.enum(['log']).default('log'),
         // @auth-end
 
         CORS_ORIGIN: list,
@@ -138,24 +139,7 @@ export function parseEnv(source: Record<string, string | undefined>) {
         PORT: v.PORT,
         HOST: v.HOST,
         API_PREFIX: v.API_PREFIX,
-        db: {
-            host: v.DB_HOST,
-            port: v.DB_PORT,
-            database: v.DB_NAME,
-            user: v.DB_USER,
-            password: v.DB_PASSWORD,
-            min: v.DB_POOL_MIN,
-            max: v.DB_POOL_MAX,
-            // Encryption WITH certificate verification. Skipping verification
-            // (rejectUnauthorized: false) would let anyone in between pose as the database.
-            ssl:
-                v.DB_SSL === 'require'
-                    ? {
-                          rejectUnauthorized: true,
-                          ...(v.DB_SSL_CA ? { ca: readFileSync(v.DB_SSL_CA, 'utf8') } : {}),
-                      }
-                    : false,
-        },
+        db: { uri: v.MONGODB_URI },
         // @auth-start
         auth: {
             accessSecret: v.JWT_ACCESS_SECRET,
@@ -164,6 +148,10 @@ export function parseEnv(source: Record<string, string | undefined>) {
             refreshTtlSeconds: v.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60,
             maxFailures: v.LOGIN_MAX_FAILURES,
             lockMinutes: v.LOGIN_LOCK_MINUTES,
+            otpTtlSeconds: v.OTP_TTL_MINUTES * 60,
+            otpMaxAttempts: v.OTP_MAX_ATTEMPTS,
+            otpResendSeconds: v.OTP_RESEND_SECONDS,
+            smsProvider: v.SMS_PROVIDER,
         },
         // @auth-end
         corsOrigins: v.CORS_ORIGIN,

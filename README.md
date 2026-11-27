@@ -78,15 +78,15 @@ errors → src/middleware/errorHandler.ts
 | Service    | coordination across several models (e.g. login)                     | be reached directly from a route |
 | Model      | all SQL, transactions                                               | touch `req` or `res`             |
 
-### Routes register themselves
+### Registering a route
 
-`src/loaders/routeLoader.ts` walks `src/routes/`, imports every file, and mounts any
-module whose default export is `{ path, router }` at `${API_PREFIX}${path}`. **There is
-no central route list** — creating the file is the registration.
+Every route file under `src/routes/` ends with `export default { path, router }`. The
+routes are listed by hand in `src/app.ts`: to add one, import the module there and add it
+to the `routeModules` list. It is mounted at `${API_PREFIX}${path}`.
 
-- `*.disabled` files are skipped (how a route is parked).
-- A file with the wrong export is a boot warning, not a silent skip.
-- Two modules with the same `path` stop the server at startup.
+- A route file that is not in `routeModules` is never mounted.
+- Add the new path to the `mounts every route module` test in `tests/app.test.ts`.
+- Keep paths unique; nothing checks for duplicates at startup.
 
 ### Response envelope
 
@@ -151,9 +151,8 @@ production), which is what lets the SameSite=Strict cookie work.
 ```
 server.ts                  process: start, graceful shutdown
 src/
-  app.ts                   middleware stack
+  app.ts                   middleware stack and the list of route modules
   config/                  env.ts (the only reader of process.env), database.ts, logger.ts, permissions.ts
-  loaders/routeLoader.ts   auto-mounts route modules
   middleware/              requestContext, validate, authenticate, requirePermission, notFound, errorHandler
   routes/ controllers/ models/   one folder per domain at each layer
   services/                auth.service.ts, token.service.ts
@@ -205,8 +204,8 @@ non-root `node` user, and reports healthy once `/api/v1/health/ready` answers.
 
 ## 7. Commits
 
-Conventional Commits (`feat: …`, `fix: …`), enforced by commitlint. The pre-commit hook
-lints and formats staged files. CI runs lint, typecheck, tests, build, the contract
+Conventional Commits (`feat: …`, `fix: …`), by convention (no commit hooks). Run
+`pnpm lint` and `pnpm format` before committing. CI runs lint, typecheck, tests, build, the contract
 check, and applies the migrations to a real PostgreSQL.
 
 Adding an endpoint: see [docs/adding-a-module.md](docs/adding-a-module.md).

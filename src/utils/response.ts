@@ -107,7 +107,7 @@ export interface PaginationQuery {
  * Normalise ?page/?limit/?search/?sortBy/?sortOrder.
  *
  * `limit` is capped at 100: an uncapped limit lets one request ask for the whole
- * table. `sortBy` is returned raw — pass it through `sortColumn()` before SQL.
+ * collection. `sortBy` is returned raw — pass it through `sortField()` before a query.
  */
 export function parsePagination(query: PaginationQuery = {}) {
     const toInt = (value: unknown) => Number.parseInt(String(value), 10);
@@ -122,4 +122,13 @@ export function parsePagination(query: PaginationQuery = {}) {
         sortOrder:
             String(query.sortOrder).toUpperCase() === 'ASC' ? ('ASC' as const) : ('DESC' as const),
     };
+}
+
+/** Whitelist a sort field: a raw `sortBy` would let a client sort on any field, hashes included. */
+export function sortField<T extends string>(
+    requested: unknown,
+    allowed: readonly T[],
+    fallback: T
+): T {
+    return allowed.find((field) => field === requested) ?? fallback;
 }

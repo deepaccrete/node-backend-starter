@@ -10,7 +10,7 @@ import 'dotenv/config';
 import type { Server } from 'node:http';
 
 import { createApp } from './src/app.js';
-import { pool, testConnection } from './src/config/database.js';
+import { disconnectDatabase, testConnection } from './src/config/database.js';
 import { env } from './src/config/env.js';
 import { logger } from './src/config/logger.js';
 import { printBanner } from './src/utils/banner.js';
@@ -52,7 +52,7 @@ async function start(): Promise<void> {
 
 /**
  * Graceful shutdown: stop accepting connections, let in-flight requests finish,
- * then close the pool so the database is not left holding connections.
+ * then close the database connection so the server is not left holding it.
  */
 async function shutdown(signal: string): Promise<void> {
     logger.info(`${signal} received — shutting down`);
@@ -69,7 +69,7 @@ async function shutdown(signal: string): Promise<void> {
                     resolve();
                 })
             );
-        await pool.end();
+        await disconnectDatabase();
         clearTimeout(forced);
         logger.info('Shutdown complete');
         process.exit(0);

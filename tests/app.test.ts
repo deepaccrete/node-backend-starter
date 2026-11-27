@@ -10,7 +10,7 @@ import type { Express } from 'express';
 
 vi.mock('../src/config/database.js', async (importOriginal) => {
     const actual = await importOriginal<typeof DatabaseModule>();
-    return { ...actual, query: vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')) };
+    return { ...actual, ping: vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')) };
 });
 
 const { createApp } = await import('../src/app.js');
@@ -35,6 +35,32 @@ describe('health', () => {
             database: 'down',
             message: 'Database unavailable',
         });
+    });
+});
+
+describe('routes', () => {
+    it('mounts every route module listed in app.ts', () => {
+        expect(app.locals.mountedRoutes).toEqual([
+            '/app/auth',
+            '/app/contacts',
+            '/auth',
+            '/openapi.json',
+            '/health',
+            '/users',
+        ]);
+    });
+
+    it.each([
+        ['GET', '/api/v1/app/auth/me'],
+        ['GET', '/api/v1/app/contacts'],
+        ['GET', '/api/v1/auth/me'],
+        ['GET', '/api/v1/openapi.json'],
+        ['GET', '/api/v1/health'],
+        ['GET', '/api/v1/users'],
+    ])('%s %s reaches its route (not ROUTE_NOT_FOUND)', async (_method, url) => {
+        const res = await request(app).get(url);
+        expect(res.status).not.toBe(404);
+        expect((res.body as { code?: string }).code).not.toBe('ROUTE_NOT_FOUND');
     });
 });
 

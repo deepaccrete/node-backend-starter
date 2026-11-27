@@ -20,10 +20,15 @@ import morgan from 'morgan';
 
 import { env } from './config/env.js';
 import { httpLogStream } from './config/logger.js';
-import { loadRoutes } from './loaders/routeLoader.js';
 import { CORS_REJECTED, errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
 import { requestContext } from './middleware/requestContext.js';
+import appAuthRoutes from './routes/app/appAuth.route.js';
+import contactsRoutes from './routes/app/contacts.route.js';
+import authRoutes from './routes/auth/auth.route.js';
+import openapiRoutes from './routes/docs/openapi.route.js';
+import healthRoutes from './routes/health/health.route.js';
+import usersRoutes from './routes/users/users.route.js';
 import type { ErrorCode } from './utils/errorCodes.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -42,7 +47,8 @@ const limiter = (max: number) =>
         },
     });
 
-export async function createApp(): Promise<Express> {
+// Kept async-shaped (returns a Promise) so callers' `await createApp()` is unchanged.
+export function createApp(): Promise<Express> {
     const app = express();
 
     // ─── Proxy awareness ──────────────────────────────────────────────
@@ -112,8 +118,10 @@ export async function createApp(): Promise<Express> {
 
     // ─── Rate limiting ────────────────────────────────────────────────
     // @auth-start
-    // Login is worth brute-forcing, so /auth has its own, stricter bucket.
+    // Login is worth brute-forcing, so /auth has its own, stricter bucket; so does
+    // the app's sign-in, where each request can also cost an SMS.
     app.use(`${env.API_PREFIX}/auth`, limiter(env.rateLimit.authMax));
+    app.use(`${env.API_PREFIX}/app/auth`, limiter(env.rateLimit.authMax));
     // @auth-end
     app.use(env.API_PREFIX, limiter(env.rateLimit.max));
 
@@ -135,8 +143,20 @@ export async function createApp(): Promise<Express> {
     }
 
     // ─── Routes ───────────────────────────────────────────────────────
-    // Auto-discovered: any route file under src/routes exporting { path, router }.
-    app.locals.mountedRoutes = await loadRoutes(app, path.join(here, 'routes'), env.API_PREFIX);
+    // Every route module is listed here. A new route file does nothing until it is
+    // imported above and added to this list.
+    const routeModules = [
+        appAuthRoutes,
+        contactsRoutes,
+        authRoutes,
+        openapiRoutes,
+        healthRoutes,
+        usersRoutes,
+    ];
+    for (const { path: routePath, router } of routeModules) {
+        app.use(`${env.API_PREFIX}${routePath}`, router);
+    }
+    app.locals.mountedRoutes = routeModules.map((m) => m.path);
 
     // ─── Fallbacks ────────────────────────────────────────────────────
     // Last, in this order: a 404 only once no route matched; the error handler
@@ -144,5 +164,5 @@ export async function createApp(): Promise<Express> {
     app.use(notFound);
     app.use(errorHandler);
 
-    return app;
+    return Promise.resolve(app);
 }

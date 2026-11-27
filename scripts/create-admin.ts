@@ -3,9 +3,10 @@
  *
  *   pnpm create-admin
  *
- * Asks for username, full name and password (typed hidden, entered twice). The
+ * Asks for username, full name, mobile (optional; needed for forgot-password)
+ * and password (typed hidden, entered twice). The
  * password is hashed with bcrypt before it reaches the database and is never
- * written to a file or log. Run once per environment, after `pnpm migrate`.
+ * written to a file or log. Run once per environment.
  */
 
 import 'dotenv/config';
@@ -13,15 +14,13 @@ import 'dotenv/config';
 import readline from 'node:readline';
 import { stdin, stdout } from 'node:process';
 
-import { pool } from '../src/config/database.js';
-import { UserModel } from '../src/models/auth/user.model.js';
+import { connectDatabase, disconnectDatabase } from '../src/config/database.js';
+import { UQ_USER_MOBILENO, UQ_USERNAME, UserModel } from '../src/models/auth/user.model.js';
+import { SYSTEM_USER } from '../src/models/sequence.model.js';
 import { hashPassword, normaliseUsername } from '../src/services/auth.service.js';
-import { isUniqueViolation } from '../src/utils/pgError.js';
+import { isDuplicateKey } from '../src/utils/mongoError.js';
 import { project } from '../src/config/project.js';
-
-// Policy for this script (Proposed, confirm with the TL): NIST SP 800-63B minimum.
-const MIN_PASSWORD = 8;
-const MAX_PASSWORD = 128;
+import { MAX_PASSWORD, MIN_PASSWORD } from '../src/utils/fields.js';
 
 function ask(question: string, hidden = false): Promise<string> {
     return new Promise((resolve) => {
@@ -55,6 +54,11 @@ async function main() {
     if (fullname.length < 2 || fullname.length > 150)
         throw new Error('Full name must be 2–150 characters.');
 
+    const mobile = (await ask('Mobile (10 digits, Enter to skip): ')).trim();
+    if (mobile && !/^[6-9]\d{9}$/.test(mobile)) {
+        throw new Error('Mobile must be a 10-digit number starting 6–9.');
+    }
+
     const password = await ask('Password: ', true);
     if (password.length < MIN_PASSWORD || password.length > MAX_PASSWORD) {
         throw new Error(`Password must be ${MIN_PASSWORD}–${MAX_PASSWORD} characters.`);
@@ -62,17 +66,22 @@ async function main() {
     if ((await ask('Repeat password: ', true)) !== password)
         throw new Error('The passwords do not match.');
 
+    // Also builds the indexes: the unique username index must exist before the insert.
+    await connectDatabase();
     try {
-        const user = await UserModel.create(0, {
+        const user = await UserModel.create(SYSTEM_USER, {
             username,
             fullname,
             rolecode: 'ADMIN',
+            mobileno: mobile || null,
             passwordhash: await hashPassword(password),
         });
         console.log(`\nCreated ADMIN "${user.username}" (id ${user.id}).`);
     } catch (err) {
-        if (isUniqueViolation(err, 'uq_usermaster_username'))
+        if (isDuplicateKey(err, UQ_USERNAME))
             throw new Error(`Username "${username}" is taken.`, { cause: err });
+        if (isDuplicateKey(err, UQ_USER_MOBILENO))
+            throw new Error(`Mobile ${mobile} belongs to another user.`, { cause: err });
         throw err;
     }
 }
@@ -83,5 +92,5 @@ try {
     console.error(`\nNot created: ${(err as Error).message}`);
     process.exitCode = 1;
 } finally {
-    await pool.end();
+    await disconnectDatabase();
 }
