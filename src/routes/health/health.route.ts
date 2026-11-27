@@ -11,7 +11,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 
-import { ping } from '../../config/database.js';
+import { query } from '../../config/database.js';
 import { jsonContent, registry } from '../../openapi/registry.js';
 import { APP_VERSION } from '../../utils/version.js';
 
@@ -31,10 +31,10 @@ router.get('/', (_req, res) => {
 
 router.get('/ready', async (_req, res) => {
     try {
-        await ping();
+        await query('SELECT 1');
         res.json({ success: true, status: 'ready', database: 'up' });
     } catch {
-        // The driver's message is not sent to an unauthenticated caller.
+        // The driver's message is logged by `query`; it is not sent to an unauthenticated caller.
         res.status(503).json({
             success: false,
             code: 'INTERNAL_ERROR',

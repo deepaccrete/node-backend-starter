@@ -1,17 +1,22 @@
-# Local full stack: MongoDB + the API. MongoDB is published on host port 27017.
-# From the host, connect with MONGODB_URI=mongodb://localhost:27017/tpjp
+# Optional local stack for working offline: PostgreSQL 16 (same major version as
+# the company server) + the API. Development normally uses the company server.
+# Postgres is published on host port 5433 so it does not clash with one on 5432.
 #
-#   docker compose up -d db                                   # database only
+#   docker compose up -d db      # database only; then run migrations/*.sql on it (DBeaver)
 #   docker compose up -d api
 services:
   db:
-    image: mongo:8
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in .env}
+      POSTGRES_USER: ${DB_USER:?set DB_USER in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
     ports:
-      - '27017:27017'
+      - '5433:5432'
     volumes:
-      - mongodata:/data/db
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping").ok']
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER}']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -23,8 +28,8 @@ services:
       # The container runs as production (stdout logs, strict CORS) whatever .env says.
       NODE_ENV: production
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
-      # Inside the compose network the database is reached by its service name.
-      MONGODB_URI: mongodb://db:27017/tpjp
+      DB_HOST: db
+      DB_PORT: '5432'
     ports:
       - '${PORT:-8001}:${PORT:-8001}'
     depends_on:
@@ -35,4 +40,4 @@ services:
       - ./uploads:/app/dist/src/public/uploads
 
 volumes:
-  mongodata:
+  pgdata:

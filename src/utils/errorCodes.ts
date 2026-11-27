@@ -25,9 +25,6 @@ export const ERROR_CODES = [
     'SESSION_EXPIRED',
     'REFRESH_REUSED',
     'FORBIDDEN',
-    'PASSWORD_CHANGE_REQUIRED',
-    'OTP_INVALID',
-    'OTP_COOLDOWN',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

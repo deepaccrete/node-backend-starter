@@ -13,9 +13,14 @@ permissions:
   contents: read
 
 env:
-  # Throwaway values for CI only; tests never read a real .env.
+  # Throwaway values for CI only; tests never read a real .env and never reach a
+  # database (they replace the model layer), so no database service runs here.
   PORT: 8001
-  MONGODB_URI: mongodb://127.0.0.1:27017/tpjp_ci
+  DB_HOST: 127.0.0.1
+  DB_PORT: 5432
+  DB_NAME: tpjp_ci
+  DB_USER: tpjp
+  DB_PASSWORD: ''
   # @auth-start
   JWT_ACCESS_SECRET: ci-access-secret-not-used-anywhere-else-0001
   JWT_REFRESH_SECRET: ci-refresh-secret-not-used-anywhere-else-002

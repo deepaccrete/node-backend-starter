@@ -25,13 +25,16 @@ which permission.
 cd tpjp/backend
 pnpm install
 cp .env.example .env     # then fill in every (required) value — see section 5
-pnpm migrate             # creates the tables in the database named in DB_NAME
-pnpm create-admin        # first Administrator: asks for username, name, password
+pnpm create-admin        # the Super Admin: asks for username, name, password
 pnpm dev                 # http://localhost:8001/api/v1
 ```
 
-The database in `DB_NAME` must already exist. With Docker instead of a local
-PostgreSQL: `docker compose up -d db` starts one on port **5433** (set `DB_PORT=5433`).
+The database in `DB_NAME` must already exist, with its tables. Development uses the
+company PostgreSQL server, database `tpjp`. There is no migration runner: the schema
+is `migrations/20261126_create_customer_masters.sql`, applied by hand (DBeaver). Every
+statement uses `IF NOT EXISTS`, so running it again is safe. To work offline instead:
+`docker compose up -d db` starts PostgreSQL 16 on port **5433** (set `DB_PORT=5433`),
+then apply the same file to it.
 
 Check it is up: `http://localhost:8001/api/v1/health` (process) and
 `/api/v1/health/ready` (database). The live contract is at `/api/v1/openapi.json`
@@ -50,8 +53,7 @@ Check it is up: `http://localhost:8001/api/v1/health` (process) and
 | `pnpm lint` / `pnpm lint:fix`                          | ESLint, zero warnings allowed         |
 | `pnpm format` / `pnpm format:check`                    | Prettier                              |
 | `pnpm test` / `pnpm test:watch` / `pnpm test:coverage` | Vitest + Supertest                    |
-| `pnpm migrate` / `pnpm migrate:status`                 | Apply / list `migrations/*.sql`       |
-| `pnpm create-admin`                                    | Create an Administrator account       |
+| `pnpm create-admin`                                    | Create the Super Admin account        |
 | `pnpm gen:openapi`                                     | Regenerate `openapi.json` (commit it) |
 
 ---
@@ -110,12 +112,19 @@ if it is stale. The frontend generates its TypeScript types from that file.
 
 ### Authentication
 
-| Endpoint             | What it does                                                                |
-| -------------------- | --------------------------------------------------------------------------- |
-| `POST /auth/login`   | `{ username, password }` → `{ user, accessToken }`; sets the refresh cookie |
-| `POST /auth/refresh` | refresh cookie → new `{ user, accessToken }`; rotates the cookie            |
-| `POST /auth/logout`  | revokes the session, clears the cookie → `204`                              |
-| `GET /auth/me`       | the signed-in user                                                          |
+Only the **Super Admin** signs in through this API (table `usermaster`, role
+`SUPERADMIN`). Every other role (Admin, GM, ZM, RM, ASM) signs in, and gets its
+role-wise dashboard access, through the .NET team's central user management (CUM)
+API; that integration is a separate task. There is no self sign-up, no forced
+password change and no forgot-password: the account is made with `pnpm create-admin`.
+
+| Endpoint                     | What it does                                                                |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `POST /auth/login`           | `{ username, password }` → `{ user, accessToken }`; sets the refresh cookie |
+| `POST /auth/refresh`         | refresh cookie → new `{ user, accessToken }`; rotates the cookie            |
+| `POST /auth/logout`          | revokes the session, clears the cookie → `204`                              |
+| `GET /auth/me`               | the signed-in user                                                          |
+| `POST /auth/change-password` | `{ currentPassword, newPassword }`; ends every session, returns a fresh one |
 
 - **Access token** (15 min): returned in the body; the frontend keeps it in memory and
   sends `Authorization: Bearer …`. The API never accepts it from a cookie (CSRF).
@@ -137,11 +146,14 @@ production), which is what lets the SameSite=Strict cookie work.
 
 ### Database conventions (house style)
 
-- Lowercase names without underscores: `customername`, `createdat`. Exception: foreign
-  keys, `usermaster_id`.
+- Lowercase names without underscores: `customername`, `createdat`. Primary key
+  `<entity>id` (`usermaster.userid`); a foreign key has the same name as the key it
+  points to (`authsession.userid`).
 - Flags are `smallint` 0/1. Soft delete: `isdeleted`; **every** query filters `isdeleted = 0`.
 - Audit columns on every table: `createdby`, `createdat`, `updatedby`, `updatedat`.
-- Named constraints (`uq_`, `fk_`, `ck_`), registered in `src/utils/pgError.ts`.
+- Timestamps are `timestamp` without a time zone, so time is always taken and compared
+  in SQL (`now()`), never with a JavaScript `Date`.
+- Named constraints (`uq_`, `fk_`, `chk_`), registered in `src/utils/pgError.ts`.
 - Never `SELECT *`. Values only through `$1, $2…`. Multi-table writes inside
   `withTransaction`, with every statement on the transaction's client (models take an
   optional `db` argument for this).
@@ -160,8 +172,8 @@ src/
   utils/                   response, errors, errorCodes, pgError, asyncHandler, banner, version
   types/express.d.ts       req.id, req.user, req.validated
   public/                  served static files (uploads)
-migrations/                SQL, applied in order
-scripts/                   migrate, create-admin, gen-openapi
+migrations/                the schema SQL, applied by hand (no runner)
+scripts/                   create-admin, gen-openapi
 tests/                     Vitest + Supertest
 openapi.json               the published contract (generated, committed)
 ```
@@ -192,8 +204,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ## 6. Docker
 
 ```bash
-docker compose up -d db
-docker compose run --rm api node dist/scripts/migrate.js up
+docker compose up -d db      # then apply migrations/*.sql to it (DBeaver)
 docker compose up -d api
 ```
 
@@ -205,7 +216,7 @@ non-root `node` user, and reports healthy once `/api/v1/health/ready` answers.
 ## 7. Commits
 
 Conventional Commits (`feat: …`, `fix: …`), by convention (no commit hooks). Run
-`pnpm lint` and `pnpm format` before committing. CI runs lint, typecheck, tests, build, the contract
-check, and applies the migrations to a real PostgreSQL.
+`pnpm lint` and `pnpm format` before committing. CI runs lint, typecheck, tests, build and the contract
+check. Tests need no database: they replace the model layer.
 
 Adding an endpoint: see [docs/adding-a-module.md](docs/adding-a-module.md).

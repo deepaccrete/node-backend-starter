@@ -1,71 +1,122 @@
 /**
- * The ONE MongoDB connection for this process (Mongoose's default connection).
+ * The ONE PostgreSQL pool for this process.
  *
- * Models import `mongoose` from HERE, not from the package, so the settings below
- * are applied before any model is compiled. Do not call `mongoose.createConnection`
- * elsewhere: a second connection doubles the pool and its models miss these settings.
+ * Every model imports `query` / `withTransaction` from here. Do not create a
+ * second pool module: two pools double the connections against the same limit,
+ * and a transaction on one pool cannot be joined by a query on the other — a
+ * silent partial write, not an error.
  */
 
-import mongoose from 'mongoose';
+import pg from 'pg';
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 
 import { env } from './env.js';
 import { logger } from './logger.js';
 
-// Fail a query at once while disconnected instead of queueing it for 10 seconds:
-// a request should get its 503/500 now, not hang.
-mongoose.set('bufferCommands', false);
-// Reject query filters on fields the schema does not declare (a typo would match everything).
-mongoose.set('strictQuery', true);
-// Nothing touches the database when a model is compiled (that happens at import,
-// before the connection exists). Indexes are built by `connectDatabase` instead.
-mongoose.set('autoCreate', false);
-mongoose.set('autoIndex', false);
+export const pool = new pg.Pool({
+    host: env.db.host,
+    port: env.db.port,
+    database: env.db.database,
+    user: env.db.user,
+    password: env.db.password,
+    min: env.db.min,
+    max: env.db.max,
+    ssl: env.db.ssl,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+});
 
-export { mongoose };
+// An error on an IDLE client (network blip, database restart) is emitted here.
+// Without this handler Node treats it as an unhandled 'error' event and exits.
+pool.on('error', (err) => {
+    logger.error('Idle client error', { message: err.message });
+});
 
-mongoose.connection.on('disconnected', () => {
-    logger.warn('Database disconnected');
-});
-mongoose.connection.on('reconnected', () => {
-    logger.info('Database reconnected');
-});
-// An error after the first connect (network blip, server restart) is emitted here.
-mongoose.connection.on('error', (err: Error) => {
-    logger.error('Database error', { message: err.message });
-});
+const oneLine = (sql: string, max: number) => sql.replace(/\s+/g, ' ').slice(0, max);
 
 /**
- * Open the connection, then build every index the schemas declare. Unique indexes
- * are what reject duplicates, so they must exist before the first write.
- * `createIndexes` only adds: it never drops an index that is no longer declared.
- * The URI holds credentials: it is never logged.
+ * Run a parameterized query.
+ *
+ * ALWAYS pass values through `params` ($1, $2, …). Never interpolate a value
+ * into `sql`. When an identifier (a sort column) must vary, whitelist it with
+ * `sortColumn()`.
  */
-export async function connectDatabase(): Promise<void> {
-    await mongoose.connect(env.db.uri, { serverSelectionTimeoutMS: 5_000 });
-    await Promise.all(Object.values(mongoose.models).map((model) => model.createIndexes()));
-}
-
-export async function disconnectDatabase(): Promise<void> {
-    await mongoose.disconnect();
-}
-
-/** Round-trip to the server. Throws when it cannot be reached. */
-export async function ping(): Promise<void> {
-    const db = mongoose.connection.db;
-    if (mongoose.connection.readyState !== mongoose.ConnectionStates.connected || !db) {
-        throw new Error('Database not connected');
+export async function query<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    params: readonly unknown[] = []
+): Promise<QueryResult<T>> {
+    const start = Date.now();
+    try {
+        const result = await pool.query<T>(sql, params as unknown[]);
+        const ms = Date.now() - start;
+        if (ms > 500) logger.warn(`Slow query ${ms}ms: ${oneLine(sql, 160)}`);
+        return result;
+    } catch (err) {
+        const e = err as Error & { code?: string };
+        logger.error('Query failed', { message: e.message, code: e.code, sql: oneLine(sql, 300) });
+        throw err;
     }
-    await db.admin().ping();
 }
 
-/** Connect once; returns the database NAME so the banner shows which one was reached. */
+/** Anything that can run a query: the pool (via `query`) or a transaction's client. */
+export type Queryable = Pick<PoolClient, 'query'>;
+
+/**
+ * Run a query on the transaction client when one is given, otherwise on the pool.
+ * Models take an optional `db` argument and call this, so the same function works
+ * standalone and as one statement inside `withTransaction`.
+ */
+export function run<T extends QueryResultRow = QueryResultRow>(
+    db: Queryable | undefined,
+    sql: string,
+    params: readonly unknown[] = []
+): Promise<QueryResult<T>> {
+    return db ? db.query<T>(sql, params as unknown[]) : query<T>(sql, params);
+}
+
+/**
+ * Run `callback` inside a transaction on a single client.
+ *
+ * Issue EVERY statement in the unit of work through the `client` it receives,
+ * never through the module-level `query` — that runs on a different connection,
+ * outside the transaction, and will not roll back.
+ */
+export async function withTransaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const result = await callback(client);
+        await client.query('COMMIT');
+        return result;
+    } catch (err) {
+        // A failed ROLLBACK must not mask the error that caused it.
+        try {
+            await client.query('ROLLBACK');
+        } catch (rollbackErr) {
+            logger.error('Rollback failed', { message: (rollbackErr as Error).message });
+        }
+        throw err;
+    } finally {
+        client.release();
+    }
+}
+
+/** Whitelist an ORDER BY column: identifiers cannot be parameterized. */
+export function sortColumn<T extends string>(
+    requested: unknown,
+    allowed: readonly T[],
+    fallback: T
+): T {
+    return allowed.find((column) => column === requested) ?? fallback;
+}
+
+/** Ping the database once; returns its NAME so the banner shows which one was reached. */
 export async function testConnection(): Promise<
     { ok: true; database: string } | { ok: false; error: string }
 > {
     try {
-        await connectDatabase();
-        await ping();
-        const database = mongoose.connection.name;
+        const { rows } = await query<{ db: string }>('SELECT current_database() AS db');
+        const database = rows[0]?.db ?? 'unknown';
         logger.info(`Database connected: ${database}`);
         return { ok: true, database };
     } catch (err) {
@@ -73,4 +124,9 @@ export async function testConnection(): Promise<
         logger.error(`Database connection failed: ${message}`);
         return { ok: false, error: message };
     }
+}
+
+/** Close every pooled connection (graceful shutdown, end of a script). */
+export async function disconnectDatabase(): Promise<void> {
+    await pool.end();
 }

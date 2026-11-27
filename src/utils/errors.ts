@@ -79,28 +79,3 @@ export class LockedError extends AppError {
         super(message, 423, 'ACCOUNT_LOCKED');
     }
 }
-
-/** Signed in with a temporary password: only change-password, /me and logout are allowed. */
-export class PasswordChangeRequiredError extends AppError {
-    constructor(message = 'Change your password to continue.') {
-        super(message, 403, 'PASSWORD_CHANGE_REQUIRED');
-    }
-}
-
-/** A one-time code that is wrong, expired, used, or out of attempts. */
-export class OtpInvalidError extends AppError {
-    constructor(message = 'The code is wrong or has expired. Request a new one.') {
-        super(message, 400, 'OTP_INVALID');
-    }
-}
-
-/** A new code was asked for too soon after the last one. */
-export class OtpCooldownError extends AppError {
-    constructor(seconds: number) {
-        super(
-            `Please wait ${seconds} second${seconds === 1 ? '' : 's'} before asking for a new code.`,
-            429,
-            'OTP_COOLDOWN'
-        );
-    }
-}

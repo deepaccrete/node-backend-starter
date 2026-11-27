@@ -23,12 +23,9 @@ import { httpLogStream } from './config/logger.js';
 import { CORS_REJECTED, errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
 import { requestContext } from './middleware/requestContext.js';
-import appAuthRoutes from './routes/app/appAuth.route.js';
-import contactsRoutes from './routes/app/contacts.route.js';
 import authRoutes from './routes/auth/auth.route.js';
 import openapiRoutes from './routes/docs/openapi.route.js';
 import healthRoutes from './routes/health/health.route.js';
-import usersRoutes from './routes/users/users.route.js';
 import type { ErrorCode } from './utils/errorCodes.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -118,10 +115,8 @@ export function createApp(): Promise<Express> {
 
     // ─── Rate limiting ────────────────────────────────────────────────
     // @auth-start
-    // Login is worth brute-forcing, so /auth has its own, stricter bucket; so does
-    // the app's sign-in, where each request can also cost an SMS.
+    // Login is worth brute-forcing, so /auth has its own, stricter bucket.
     app.use(`${env.API_PREFIX}/auth`, limiter(env.rateLimit.authMax));
-    app.use(`${env.API_PREFIX}/app/auth`, limiter(env.rateLimit.authMax));
     // @auth-end
     app.use(env.API_PREFIX, limiter(env.rateLimit.max));
 
@@ -145,14 +140,7 @@ export function createApp(): Promise<Express> {
     // ─── Routes ───────────────────────────────────────────────────────
     // Every route module is listed here. A new route file does nothing until it is
     // imported above and added to this list.
-    const routeModules = [
-        appAuthRoutes,
-        contactsRoutes,
-        authRoutes,
-        openapiRoutes,
-        healthRoutes,
-        usersRoutes,
-    ];
+    const routeModules = [authRoutes, openapiRoutes, healthRoutes];
     for (const { path: routePath, router } of routeModules) {
         app.use(`${env.API_PREFIX}${routePath}`, router);
     }

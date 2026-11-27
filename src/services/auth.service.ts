@@ -1,7 +1,10 @@
 /**
  * Authentication — coordinates the user and session models and the tokens.
  *
- * A service, not a model, because each flow spans two collections plus token signing.
+ * Only the Super Admin signs in here; every other role uses the .NET team's
+ * central user management (CUM) API.
+ *
+ * A service, not a model, because each flow spans two tables plus token signing.
  * Reached only from the auth controller, never directly from a route.
  */
 
@@ -11,14 +14,7 @@ import { env } from '../config/env.js';
 import { permissionsFor, type Permission, type Role } from '../config/permissions.js';
 import { SessionModel } from '../models/auth/session.model.js';
 import { UserModel, type UserRow } from '../models/auth/user.model.js';
-import {
-    BadRequestError,
-    LockedError,
-    OtpCooldownError,
-    OtpInvalidError,
-    UnauthorizedError,
-} from '../utils/errors.js';
-import { OtpService } from './otp.service.js';
+import { BadRequestError, LockedError, UnauthorizedError } from '../utils/errors.js';
 import {
     hashToken,
     signAccessToken,
@@ -35,8 +31,6 @@ export interface PublicUser {
     name: string;
     role: Role;
     permissions: Permission[];
-    /** True after an Admin set a temporary password: the client shows change-password first. */
-    mustChangePassword: boolean;
 }
 
 export interface IssuedSession {
@@ -67,10 +61,7 @@ const toPublicUser = (row: UserRow): PublicUser => ({
     name: row.fullname,
     role: row.rolecode,
     permissions: permissionsFor(row.rolecode),
-    mustChangePassword: row.mustchangepassword === 1,
 });
-
-const refreshExpiry = () => new Date(Date.now() + env.auth.refreshTtlSeconds * 1000);
 
 const accessTokenFor = (user: PublicUser, sid: string) =>
     signAccessToken({
@@ -78,7 +69,6 @@ const accessTokenFor = (user: PublicUser, sid: string) =>
         sid,
         role: user.role,
         permissions: user.permissions,
-        ...(user.mustChangePassword ? { pwc: true } : {}),
     });
 
 /**
@@ -91,14 +81,11 @@ async function openSession(user: PublicUser, client: ClientInfo): Promise<Issued
     const refreshToken = signRefreshToken({ sub: String(user.id), sid, gen: 1 });
     await SessionModel.create(sid, user.id, {
         refreshTokenHash: hashToken(refreshToken),
-        expiresAt: refreshExpiry(),
+        ttlSeconds: env.auth.refreshTtlSeconds,
         ...client,
     });
     return { user, accessToken: accessTokenFor(user, sid), refreshToken };
 }
-
-const RESET_SENT =
-    'If the username and mobile number match an account, a code has been sent to that mobile.';
 
 export const AuthService = {
     async login(
@@ -113,8 +100,8 @@ export const AuthService = {
             throw new UnauthorizedError(INVALID_CREDENTIALS, 'INVALID_CREDENTIALS');
         }
 
-        if (user.lockeduntil && user.lockeduntil.getTime() > Date.now()) {
-            const minutes = Math.ceil((user.lockeduntil.getTime() - Date.now()) / 60_000);
+        if (user.lockedminutes > 0) {
+            const minutes = user.lockedminutes;
             throw new LockedError(
                 `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`
             );
@@ -141,12 +128,7 @@ export const AuthService = {
         const claims = verifyRefreshToken(token);
         const session = await SessionModel.findById(claims.sid);
 
-        // `usermaster_id` is null on an app session: not one this endpoint can refresh.
-        if (
-            session?.usermaster_id == null ||
-            session.revokedat ||
-            session.expiresat.getTime() <= Date.now()
-        ) {
+        if (!session || session.isended) {
             throw new UnauthorizedError(
                 'Your session has expired. Please sign in again.',
                 'SESSION_EXPIRED'
@@ -154,14 +136,14 @@ export const AuthService = {
         }
 
         if (claims.gen !== session.generation || hashToken(token) !== session.refreshtokenhash) {
-            await SessionModel.revokeAllForUser(session.usermaster_id);
+            await SessionModel.revokeAllForUser(session.userid);
             throw new UnauthorizedError(
                 'Your session was ended for security reasons. Please sign in again.',
                 'REFRESH_REUSED'
             );
         }
 
-        const user = await UserModel.findActiveById(session.usermaster_id);
+        const user = await UserModel.findActiveById(session.userid);
         if (!user) {
             await SessionModel.revoke(session.id);
             throw new UnauthorizedError(
@@ -179,7 +161,7 @@ export const AuthService = {
             session.id,
             session.generation,
             hashToken(next),
-            refreshExpiry()
+            env.auth.refreshTtlSeconds
         );
         if (!rotated) {
             // Another request rotated this session a moment earlier.
@@ -244,44 +226,10 @@ export const AuthService = {
                 ]
             );
         }
-        await UserModel.setPassword(userId, await hashPassword(newPassword), 0, userId);
+        await UserModel.setPassword(userId, await hashPassword(newPassword), userId);
         await SessionModel.revokeAllForUser(userId);
         const user = await UserModel.findActiveById(userId);
         if (!user) throw new UnauthorizedError();
         return openSession(toPublicUser(user), client);
-    },
-
-    /**
-     * Text a reset code to the user's registered mobile. The answer is the same
-     * whether or not the details match, so this cannot be used to find accounts.
-     */
-    async forgotPassword(usernameInput: string, mobileno: string): Promise<string> {
-        const userId = await UserModel.findIdForReset(normaliseUsername(usernameInput), mobileno);
-        if (userId === null) return RESET_SENT;
-        try {
-            await OtpService.issue(
-                { purpose: 'PASSWORD_RESET', mobileno },
-                (code, minutes) =>
-                    `${code} is your TPJP password reset code. It expires in ${minutes} minutes. Do not share it.`
-            );
-        } catch (err) {
-            // Saying "wait" only for real accounts would reveal which ones exist.
-            if (!(err instanceof OtpCooldownError)) throw err;
-        }
-        return RESET_SENT;
-    },
-
-    /** Set a new password with the texted code. Ends every session of the user. */
-    async resetPassword(
-        usernameInput: string,
-        mobileno: string,
-        code: string,
-        newPassword: string
-    ): Promise<void> {
-        const userId = await UserModel.findIdForReset(normaliseUsername(usernameInput), mobileno);
-        if (userId === null) throw new OtpInvalidError();
-        await OtpService.verify({ purpose: 'PASSWORD_RESET', mobileno }, code);
-        await UserModel.setPassword(userId, await hashPassword(newPassword), 0, userId);
-        await SessionModel.revokeAllForUser(userId);
     },
 };

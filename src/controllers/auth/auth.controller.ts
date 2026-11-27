@@ -14,12 +14,7 @@ import { project } from '../../config/project.js';
 import { AuthService, type IssuedSession } from '../../services/auth.service.js';
 import { UnauthorizedError } from '../../utils/errors.js';
 import { success } from '../../utils/response.js';
-import type {
-    ChangePasswordBody,
-    ForgotPasswordBody,
-    LoginBody,
-    ResetPasswordBody,
-} from '../../routes/auth/auth.route.js';
+import type { ChangePasswordBody, LoginBody } from '../../routes/auth/auth.route.js';
 
 export const REFRESH_COOKIE = `${project.slug}_rt`;
 
@@ -90,18 +85,5 @@ export const AuthController = {
             clientOf(req)
         );
         return sendSession(res, session, 'Password changed');
-    },
-
-    forgotPassword: async (req: Request, res: Response) => {
-        const { username, mobile } = req.body as ForgotPasswordBody;
-        const message = await AuthService.forgotPassword(username, mobile);
-        return success(res, { message }, message);
-    },
-
-    resetPassword: async (req: Request, res: Response) => {
-        const { username, mobile, otp, newPassword } = req.body as ResetPasswordBody;
-        await AuthService.resetPassword(username, mobile, otp, newPassword);
-        const message = 'Password reset. Sign in with your new password.';
-        return success(res, { message }, message);
     },
 };

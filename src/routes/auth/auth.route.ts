@@ -2,11 +2,13 @@
  * Auth routes. Mounted automatically at ${API_PREFIX}/auth by the route loader —
  * the `{ path, router }` export at the bottom IS the registration.
  *
- * login / refresh / logout are public by nature (they create or end a session),
- * as are forgot-password / reset-password (the user cannot sign in).
- * /me and change-password require a signed-in user, and are the only routes a
- * user with a temporary password may reach. There is no self sign-up: Admins
- * create accounts (routes/users). app.ts gives /auth its own, stricter rate limit.
+ * Only the Super Admin signs in here; every other role signs in through the
+ * .NET team's central user management (CUM) API.
+ *
+ * login / refresh / logout are public by nature (they create or end a session).
+ * /me and change-password require a signed-in user. There is no self sign-up and
+ * no forgot-password: the Super Admin account is made with `pnpm create-admin`.
+ * app.ts gives /auth its own, stricter rate limit.
  */
 
 import { Router } from 'express';
@@ -14,7 +16,7 @@ import { z } from 'zod';
 
 import { AuthController, REFRESH_COOKIE } from '../../controllers/auth/auth.controller.js';
 import { PERMISSIONS, ROLES } from '../../config/permissions.js';
-import { authenticateAllowingPasswordChange } from '../../middleware/authenticate.js';
+import { authenticate } from '../../middleware/authenticate.js';
 import { validate } from '../../middleware/validate.js';
 import {
     envelope,
@@ -24,7 +26,7 @@ import {
     requiresAuth,
 } from '../../openapi/registry.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
-import { MobileSchema, NewPasswordSchema, OtpCodeSchema } from '../../utils/fields.js';
+import { NewPasswordSchema } from '../../utils/fields.js';
 
 // ─── Field rules ──────────────────────────────────────────────────────
 // Used for validation AND the OpenAPI contract. Lengths mirror the columns
@@ -53,10 +55,6 @@ export const PublicUserSchema = z
         name: z.string(),
         role: z.enum(ROLES),
         permissions: z.array(z.enum(PERMISSIONS)),
-        mustChangePassword: z.boolean().meta({
-            description:
-                'Signed in with a temporary password: every other endpoint answers 403 PASSWORD_CHANGE_REQUIRED until it is changed.',
-        }),
     })
     .meta({ id: 'User' });
 
@@ -69,12 +67,6 @@ export const SessionSchema = z
     })
     .meta({ id: 'Session' });
 
-const ForgotUsernameSchema = z
-    .string({ error: 'Enter your username' })
-    .trim()
-    .min(1, 'Enter your username')
-    .max(64, 'Username is too long');
-
 export const ChangePasswordBodySchema = z
     .object({
         currentPassword: z
@@ -86,25 +78,6 @@ export const ChangePasswordBodySchema = z
     .meta({ id: 'ChangePasswordRequest' });
 
 export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>;
-
-export const ForgotPasswordBodySchema = z
-    .object({ username: ForgotUsernameSchema, mobile: MobileSchema })
-    .meta({ id: 'ForgotPasswordRequest' });
-
-export type ForgotPasswordBody = z.infer<typeof ForgotPasswordBodySchema>;
-
-export const ResetPasswordBodySchema = z
-    .object({
-        username: ForgotUsernameSchema,
-        mobile: MobileSchema,
-        otp: OtpCodeSchema,
-        newPassword: NewPasswordSchema,
-    })
-    .meta({ id: 'ResetPasswordRequest' });
-
-export type ResetPasswordBody = z.infer<typeof ResetPasswordBodySchema>;
-
-export const MessageSchema = z.object({ message: z.string() }).meta({ id: 'Message' });
 
 // ─── Endpoints ────────────────────────────────────────────────────────
 
@@ -149,7 +122,7 @@ registry.registerPath({
     responses: { 204: { description: 'Signed out' } },
 });
 
-router.get('/me', authenticateAllowingPasswordChange, asyncHandler(AuthController.me));
+router.get('/me', authenticate, asyncHandler(AuthController.me));
 registry.registerPath({
     method: 'get',
     path: `${PATH}/me`,
@@ -164,7 +137,7 @@ registry.registerPath({
 
 router.post(
     '/change-password',
-    authenticateAllowingPasswordChange,
+    authenticate,
     validate({ body: ChangePasswordBodySchema }),
     asyncHandler(AuthController.changePassword)
 );
@@ -179,43 +152,6 @@ registry.registerPath({
     responses: {
         200: { description: 'Changed', content: jsonContent(envelope(SessionSchema)) },
         ...errorResponses(400, 401, 429),
-    },
-});
-
-router.post(
-    '/forgot-password',
-    validate({ body: ForgotPasswordBodySchema }),
-    asyncHandler(AuthController.forgotPassword)
-);
-registry.registerPath({
-    method: 'post',
-    path: `${PATH}/forgot-password`,
-    tags: ['Auth'],
-    summary: 'Text a password reset code to the registered mobile',
-    description:
-        'The same answer whether or not the username and mobile match an account, so it cannot be used to find accounts.',
-    request: { body: { content: jsonContent(ForgotPasswordBodySchema) } },
-    responses: {
-        200: { description: 'Accepted', content: jsonContent(envelope(MessageSchema)) },
-        ...errorResponses(400, 429),
-    },
-});
-
-router.post(
-    '/reset-password',
-    validate({ body: ResetPasswordBodySchema }),
-    asyncHandler(AuthController.resetPassword)
-);
-registry.registerPath({
-    method: 'post',
-    path: `${PATH}/reset-password`,
-    tags: ['Auth'],
-    summary: 'Set a new password with the texted code',
-    description: 'Ends every session of the user; they sign in with the new password.',
-    request: { body: { content: jsonContent(ResetPasswordBodySchema) } },
-    responses: {
-        200: { description: 'Password reset', content: jsonContent(envelope(MessageSchema)) },
-        ...errorResponses(400, 429),
     },
 });
 

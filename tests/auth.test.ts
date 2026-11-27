@@ -19,7 +19,6 @@ interface FakeUser {
     username: string;
     fullname: string;
     rolecode: Role;
-    mustchangepassword: number;
     passwordhash: string;
     failedlogins: number;
     lockeduntil: Date | null;
@@ -27,7 +26,7 @@ interface FakeUser {
 }
 interface FakeSession {
     id: string;
-    usermaster_id: number;
+    userid: number;
     refreshtokenhash: string;
     generation: number;
     expiresat: Date;
@@ -40,15 +39,21 @@ const store = vi.hoisted(() => ({
     nextSession: 1,
 }));
 
-// The real module's other exports (index names, sort fields) are kept; only the calls are faked.
+// The real module's other exports (index names) are kept; only the calls are faked.
 vi.mock('../src/models/auth/user.model.js', async (importOriginal) => {
     const byId = (id: number) => [...store.users.values()].find((u) => u.id === id);
     return {
         ...(await importOriginal<typeof UserModule>()),
         UserModel: {
-            findCredentialsByUsername: vi.fn((username: string) =>
-                Promise.resolve(store.users.get(username) ?? null)
-            ),
+            findCredentialsByUsername: vi.fn((username: string) => {
+                const u = store.users.get(username);
+                if (!u) return Promise.resolve(null);
+                const left = u.lockeduntil ? u.lockeduntil.getTime() - Date.now() : 0;
+                return Promise.resolve({
+                    ...u,
+                    lockedminutes: left > 0 ? Math.ceil(left / 60_000) : 0,
+                });
+            }),
             findActiveById: vi.fn((id: number) => {
                 const u = byId(id);
                 return Promise.resolve(u?.isactive === 1 ? u : null);
@@ -69,32 +74,51 @@ vi.mock('../src/models/auth/user.model.js', async (importOriginal) => {
     };
 });
 
+const ended = (s: FakeSession) => s.revokedat !== null || s.expiresat.getTime() <= Date.now();
+
 vi.mock('../src/models/auth/session.model.js', () => ({
     SessionModel: {
         newId: vi.fn(() => Promise.resolve(String(store.nextSession++))),
         create: vi.fn(
-            (id: string, userId: number, data: { refreshTokenHash: string; expiresAt: Date }) => {
-                const s: FakeSession = {
+            (
+                id: string,
+                userId: number,
+                data: { refreshTokenHash: string; ttlSeconds: number }
+            ) => {
+                store.sessions.set(id, {
                     id,
-                    usermaster_id: userId,
+                    userid: userId,
                     refreshtokenhash: data.refreshTokenHash,
                     generation: 1,
-                    expiresat: data.expiresAt,
+                    expiresat: new Date(Date.now() + data.ttlSeconds * 1000),
                     revokedat: null,
-                };
-                store.sessions.set(s.id, s);
-                return Promise.resolve({ ...s });
+                });
+                return Promise.resolve();
             }
         ),
         findById: vi.fn((id: string) => {
             const s = store.sessions.get(id);
-            return Promise.resolve(s ? { ...s } : null);
+            return Promise.resolve(
+                s
+                    ? {
+                          id: s.id,
+                          userid: s.userid,
+                          refreshtokenhash: s.refreshtokenhash,
+                          generation: s.generation,
+                          isended: ended(s),
+                      }
+                    : null
+            );
         }),
-        rotate: vi.fn((id: string, gen: number, hash: string, expiresAt: Date) => {
+        rotate: vi.fn((id: string, gen: number, hash: string, ttlSeconds: number) => {
             const s = store.sessions.get(id);
-            if (s?.generation !== gen || s.revokedat) return Promise.resolve(null);
-            Object.assign(s, { generation: gen + 1, refreshtokenhash: hash, expiresat: expiresAt });
-            return Promise.resolve({ ...s });
+            if (s?.generation !== gen || s.revokedat) return Promise.resolve(false);
+            Object.assign(s, {
+                generation: gen + 1,
+                refreshtokenhash: hash,
+                expiresat: new Date(Date.now() + ttlSeconds * 1000),
+            });
+            return Promise.resolve(true);
         }),
         revoke: vi.fn((id: string) => {
             const s = store.sessions.get(id);
@@ -103,7 +127,7 @@ vi.mock('../src/models/auth/session.model.js', () => ({
         }),
         revokeAllForUser: vi.fn((userId: number) => {
             for (const s of store.sessions.values())
-                if (s.usermaster_id === userId) s.revokedat = new Date();
+                if (s.userid === userId) s.revokedat = new Date();
             return Promise.resolve();
         }),
     },
@@ -116,13 +140,13 @@ const { authenticate } = await import('../src/middleware/authenticate.js');
 const { requirePermission } = await import('../src/middleware/requirePermission.js');
 const { errorHandler } = await import('../src/middleware/errorHandler.js');
 const { requestContext } = await import('../src/middleware/requestContext.js');
-const { signAccessToken, signAppAccessToken } = await import('../src/services/token.service.js');
+const { signAccessToken } = await import('../src/services/token.service.js');
 const { REFRESH_COOKIE } = await import('../src/controllers/auth/auth.controller.js');
 const { ROLES } = await import('../src/config/permissions.js');
 
-// Role-agnostic: ADMIN always exists; MEMBER is any other role the project defines.
-const MEMBER: Role = ROLES.find((r) => r !== 'ADMIN') ?? 'ADMIN';
-/** Granted to ADMIN in every project (ADMIN holds every permission). */
+// SUPERADMIN is the one role that signs in here; MEMBER is any role without every permission.
+const MEMBER: Role = ROLES.find((r) => r !== 'SUPERADMIN' && r !== 'ADMIN') ?? 'ADMIN';
+/** Granted to SUPERADMIN (it holds every permission). */
 const ADMIN_ONLY = 'users:manage';
 
 const PASSWORD = 'correct horse battery';
@@ -134,7 +158,6 @@ function addUser(id: number, username: string, rolecode: Role, extra: Partial<Fa
         username,
         fullname: `${username} name`,
         rolecode,
-        mustchangepassword: 0,
         passwordhash: bcrypt.hashSync(PASSWORD, 4), // low cost keeps tests fast
         failedlogins: 0,
         lockeduntil: null,
@@ -161,7 +184,7 @@ beforeAll(async () => {
 beforeEach(() => {
     store.users.clear();
     store.sessions.clear();
-    addUser(1, 'admin', 'ADMIN');
+    addUser(1, 'admin', 'SUPERADMIN');
     addUser(2, 'member', MEMBER);
 });
 
@@ -172,7 +195,7 @@ describe('POST /auth/login', () => {
         const body = res.body as {
             data: { user: { role: string; permissions: string[] }; accessToken: string };
         };
-        expect(body.data.user.role).toBe('ADMIN');
+        expect(body.data.user.role).toBe('SUPERADMIN');
         expect(body.data.user.permissions).toContain(ADMIN_ONLY);
         expect(body.data.accessToken).toEqual(expect.any(String));
 
@@ -360,62 +383,5 @@ describe('requirePermission', () => {
 
     it('answers 401 without a token', async () => {
         expect((await request(guarded).get('/upload')).status).toBe(401);
-    });
-});
-
-describe('temporary password', () => {
-    const bearer = (res: request.Response) =>
-        `Bearer ${(res.body as { data: { accessToken: string } }).data.accessToken}`;
-
-    it('flags the session, allows /auth/me and refuses everything else (PASSWORD_CHANGE_REQUIRED)', async () => {
-        addUser(3, 'newbie', 'ADMIN', { mustchangepassword: 1 });
-        const res = await login('newbie');
-        expect(res.status).toBe(200);
-        expect(res.body).toMatchObject({ data: { user: { mustChangePassword: true } } });
-
-        const me = await request(app).get('/api/v1/auth/me').set('Authorization', bearer(res));
-        expect(me.status).toBe(200);
-
-        const users = await request(app).get('/api/v1/users').set('Authorization', bearer(res));
-        expect(users.status).toBe(403);
-        expect(users.body).toMatchObject({ code: 'PASSWORD_CHANGE_REQUIRED' });
-    });
-
-    it('does not flag a normal sign-in', async () => {
-        const res = await login('admin');
-        expect(res.body).toMatchObject({ data: { user: { mustChangePassword: false } } });
-    });
-});
-
-describe('dashboard and app tokens', () => {
-    it('are not accepted in place of each other', async () => {
-        const appToken = signAppAccessToken({ sub: '5', sid: '1', distributorid: 1 });
-        const onDashboard = await request(app)
-            .get('/api/v1/auth/me')
-            .set('Authorization', `Bearer ${appToken}`);
-        expect(onDashboard.status).toBe(401);
-
-        const dashToken = signAccessToken({
-            sub: '1',
-            sid: '1',
-            role: 'ADMIN',
-            permissions: [ADMIN_ONLY],
-        });
-        const onApp = await request(app)
-            .get('/api/v1/app/contacts')
-            .set('Authorization', `Bearer ${dashToken}`);
-        expect(onApp.status).toBe(401);
-    });
-
-    it('/users needs users:manage', async () => {
-        const member = await login('member');
-        const res = await request(app)
-            .get('/api/v1/users')
-            .set(
-                'Authorization',
-                `Bearer ${(member.body as { data: { accessToken: string } }).data.accessToken}`
-            );
-        expect(res.status).toBe(403);
-        expect(res.body).toMatchObject({ code: 'FORBIDDEN' });
     });
 });

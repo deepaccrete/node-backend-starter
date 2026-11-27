@@ -6,7 +6,9 @@
  * capability by editing this table only.
  */
 
-export const ROLES = ['ADMIN', 'GM', 'ZM', 'RM', 'ASM'] as const;
+// SUPERADMIN signs in through this API (usermaster). The others sign in through
+// the .NET team's central user management (CUM) API.
+export const ROLES = ['SUPERADMIN', 'ADMIN', 'GM', 'ZM', 'RM', 'ASM'] as const;
 export type Role = (typeof ROLES)[number];
 
 export const PERMISSIONS = [
@@ -28,6 +30,7 @@ const MANAGER_PERMISSIONS: readonly Permission[] = [
 ];
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
+    SUPERADMIN: PERMISSIONS,
     ADMIN: PERMISSIONS,
     GM: MANAGER_PERMISSIONS,
     ZM: MANAGER_PERMISSIONS,
@@ -49,6 +52,7 @@ export function permissionsFor(role: Role): Permission[] {
  * structure during design.
  */
 export const REPORTS_TO_ROLE: Record<Role, Role | null> = {
+    SUPERADMIN: null,
     ADMIN: null,
     GM: null,
     ZM: 'GM',
